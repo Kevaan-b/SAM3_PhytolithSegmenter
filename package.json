@@ -5,14 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:server": "python server/run.py",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"
   },
-  "dependencies": {
-    "@huggingface/transformers": "3.8.0"
-  },
+  "dependencies": {},
   "devDependencies": {
     "jsdom": "^29.1.1",
     "typescript": "^5.8.3",

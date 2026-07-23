@@ -6,13 +6,6 @@ export interface PointPrompt {
   label: PointLabel;
 }
 
-export interface ExampleImage {
-  id: string;
-  label: string;
-  description: string;
-  url: string;
-}
-
 export type MainToWorkerMessage =
   | {
       type: "initialize";
@@ -21,6 +14,7 @@ export type MainToWorkerMessage =
   | {
       type: "load-image";
       imageRevision: number;
+      imageId: string;
       url: string;
     }
   | {
@@ -51,12 +45,14 @@ export type WorkerToMainMessage =
       width: number;
       height: number;
       encodeMs: number;
+      cacheHit: boolean;
     }
   | {
       type: "mask-ready";
       imageRevision: number;
       stateRevision: number;
       decodeMs: number;
+      serverDecodeMs: number;
       applied: boolean;
     }
   | {
@@ -70,4 +66,14 @@ export type WorkerToMainMessage =
       message: string;
       imageRevision?: number;
       stateRevision?: number;
+    }
+  | {
+      type: "cache-status";
+      missing: number;
+      queued: number;
+      encoding: number;
+      ready: number;
+      total: number;
+      gpuResident: number;
+      queueDepth: number;
     };

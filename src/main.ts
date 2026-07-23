@@ -8,28 +8,23 @@ import {
   promptKey,
   removeLastPoint,
 } from "./core";
+import {
+  adjacentFolder,
+  adjacentImage,
+  findFolder,
+  firstFolderWithImages,
+  flattenFolders,
+  folderBreadcrumbs,
+  type DataFolder,
+  type DataImage,
+  type NavigationMode,
+} from "./data-navigator";
 import type {
-  ExampleImage,
   MainToWorkerMessage,
   PointLabel,
   PointPrompt,
   WorkerToMainMessage,
 } from "./protocol";
-
-const EXAMPLES: ExampleImage[] = [
-  {
-    id: "lumen",
-    label: "Example 01",
-    description: "Microscopy lumen",
-    url: "/example/1/Screenshot%202026-07-22%20at%2012.38.24%E2%80%AFPM.png",
-  },
-  {
-    id: "filament",
-    label: "Example 02",
-    description: "Microscopy filament",
-    url: "/example/2/Screenshot%202026-07-22%20at%2012.32.13%E2%80%AFPM.png",
-  },
-];
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <div class="app-shell">
@@ -42,7 +37,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
       </a>
       <div class="model-pill">
         <span class="model-dot"></span>
-        SAM3 Q4 · LOCAL WEBGPU
+        SAM3 Q4 · H100 CUDA
       </div>
     </header>
 
@@ -58,9 +53,53 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <section class="control-section">
           <div class="section-heading">
             <span>01</span>
-            <h2>Choose an image</h2>
+            <h2>Browse data</h2>
           </div>
-          <div class="example-list" id="example-list"></div>
+          <div class="data-browser">
+            <nav class="folder-crumbs" id="folder-crumbs" aria-label="Data folder path"></nav>
+            <span class="browser-label" id="folder-tree-label">Folder</span>
+            <div class="folder-tree-picker" id="folder-tree-picker">
+              <button
+                class="folder-tree-trigger"
+                id="folder-tree-trigger"
+                type="button"
+                aria-labelledby="folder-tree-label folder-tree-value"
+                aria-haspopup="tree"
+                aria-expanded="false"
+                disabled
+              >
+                <span id="folder-tree-value">Scanning data/…</span>
+                <span aria-hidden="true">⌄</span>
+              </button>
+              <div class="folder-tree-menu" id="folder-tree-menu" hidden>
+                <div class="folder-tree" id="folder-tree" role="tree"></div>
+              </div>
+            </div>
+            <label class="browser-label" for="image-select">Image</label>
+            <select class="browser-select" id="image-select" disabled>
+              <option>No images</option>
+            </select>
+            <div class="browser-navigation">
+              <button class="nav-button" id="previous-button" type="button" disabled>
+                ← Previous
+              </button>
+              <div class="navigation-toggle" role="group" aria-label="Previous and next target">
+                <button class="active" id="navigate-folders" type="button" aria-pressed="true">
+                  Folders
+                </button>
+                <button id="navigate-images" type="button" aria-pressed="false">
+                  Images
+                </button>
+              </div>
+              <button class="nav-button" id="next-button" type="button" disabled>
+                Next →
+              </button>
+            </div>
+            <button class="refresh-button" id="refresh-data" type="button">
+              ↻ Rescan data folder
+            </button>
+            <p class="data-summary" id="data-summary">Looking for images under data/…</p>
+          </div>
         </section>
 
         <section class="control-section">
@@ -98,11 +137,11 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <div class="viewer-topline">
           <div>
             <div class="eyebrow">Live canvas</div>
-            <h2 id="viewer-title">Microscopy lumen</h2>
+            <h2 id="viewer-title">No image selected</h2>
           </div>
           <div class="status-chip loading" id="status-chip" role="status" aria-live="polite">
             <span class="status-light"></span>
-            <span id="status-label">Checking WebGPU…</span>
+            <span id="status-label">Connecting to H100…</span>
           </div>
         </div>
 
@@ -112,13 +151,13 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 
         <div class="image-frame" id="image-frame">
           <div class="image-stage disabled" id="image-stage">
-            <img id="source-image" alt="Selected microscopy example" draggable="false" />
+            <img id="source-image" alt="Selected data image" draggable="false" />
             <canvas id="mask-overlay" aria-hidden="true"></canvas>
             <div class="marker-layer" id="marker-layer" aria-hidden="true"></div>
             <div class="stage-message" id="stage-message">
               <span class="loader"></span>
-              <strong>Loading local model</strong>
-              <small>The first load includes the 369 MB image encoder.</small>
+              <strong>Connecting to the H100</strong>
+              <small>The server is loading SAM3 and preparing embeddings.</small>
             </div>
           </div>
           <div class="corner-guide top-left"></div>
@@ -139,7 +178,20 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   </div>
 `;
 
-const exampleList = getElement<HTMLDivElement>("example-list");
+const folderCrumbs = getElement<HTMLElement>("folder-crumbs");
+const folderTreePicker = getElement<HTMLDivElement>("folder-tree-picker");
+const folderTreeTrigger =
+  getElement<HTMLButtonElement>("folder-tree-trigger");
+const folderTreeValue = getElement<HTMLSpanElement>("folder-tree-value");
+const folderTreeMenu = getElement<HTMLDivElement>("folder-tree-menu");
+const folderTree = getElement<HTMLDivElement>("folder-tree");
+const imageSelect = getElement<HTMLSelectElement>("image-select");
+const previousButton = getElement<HTMLButtonElement>("previous-button");
+const nextButton = getElement<HTMLButtonElement>("next-button");
+const refreshDataButton = getElement<HTMLButtonElement>("refresh-data");
+const navigateFolders = getElement<HTMLButtonElement>("navigate-folders");
+const navigateImages = getElement<HTMLButtonElement>("navigate-images");
+const dataSummary = getElement<HTMLParagraphElement>("data-summary");
 const imageStage = getElement<HTMLDivElement>("image-stage");
 const sourceImage = getElement<HTMLImageElement>("source-image");
 const overlay = getElement<HTMLCanvasElement>("mask-overlay");
@@ -160,7 +212,11 @@ const imageFrame = getElement<HTMLDivElement>("image-frame");
 const encodeMetric = getElement<HTMLElement>("encode-metric");
 const decodeMetric = getElement<HTMLElement>("decode-metric");
 
-let activeExample = EXAMPLES[0]!;
+let dataRoot: DataFolder | null = null;
+let currentFolder: DataFolder | null = null;
+let activeImage: DataImage | null = null;
+let navigationMode: NavigationMode = "folder";
+const expandedFolderPaths = new Set<string>([""]);
 let activeTool: PointLabel = 1;
 let pinnedPoints: PointPrompt[] = [];
 let hoverPoint: PointPrompt | null = null;
@@ -184,18 +240,16 @@ window.addEventListener("resize", () => {
     setStageSize(displayImageSize.width, displayImageSize.height);
   }
 });
-renderExampleButtons();
-setExampleImage(activeExample);
+renderDataBrowser();
 updatePointControls();
 
 if (
-  !("gpu" in navigator) ||
   !("Worker" in window) ||
   !("transferControlToOffscreen" in overlay)
 ) {
   showFatal(
-    "This demo needs WebGPU and OffscreenCanvas. Open it in a current Chrome or Edge browser with hardware acceleration enabled.",
-    "WebGPU unavailable",
+    "This demo needs Web Workers and OffscreenCanvas. Open it in a current Chrome or Edge browser.",
+    "Browser unsupported",
   );
 } else {
   const inferenceWorker = new Worker(
@@ -214,6 +268,7 @@ if (
 
   const offscreen = overlay.transferControlToOffscreen();
   postWorker({ type: "initialize", canvas: offscreen }, [offscreen]);
+  void refreshData();
 
   function postWorker(
     message: MainToWorkerMessage,
@@ -244,7 +299,22 @@ if (
       case "model-ready": {
         modelReady = true;
         progressTrack.classList.remove("visible");
-        loadActiveExample();
+        if (activeImage) {
+          loadActiveImage();
+        } else {
+          setStatus("ready", "Model ready · select an image");
+        }
+        return;
+      }
+
+      case "cache-status": {
+        dataSummary.textContent = `${message.ready}/${message.total} embeddings cached · ${message.gpuResident} on H100 · ${message.queueDepth} queued`;
+        if (message.total > 0 && message.ready < message.total) {
+          progressTrack.classList.add("visible");
+          progressBar.style.width = `${(message.ready / message.total) * 100}%`;
+        } else if (modelReady) {
+          progressTrack.classList.remove("visible");
+        }
         return;
       }
 
@@ -254,7 +324,9 @@ if (
         imageReady = true;
         imageStage.classList.remove("disabled");
         stageMessage.classList.add("hidden");
-        encodeMetric.textContent = formatDuration(message.encodeMs);
+        encodeMetric.textContent = message.cacheHit
+          ? `cache hit · ${formatDuration(message.encodeMs)}`
+          : formatDuration(message.encodeMs);
         setStatus("ready", "Ready · hover to segment");
         return;
       }
@@ -266,7 +338,7 @@ if (
         ) {
           return;
         }
-        decodeMetric.textContent = formatDuration(message.decodeMs);
+        decodeMetric.textContent = `${formatDuration(message.decodeMs)} · GPU ${formatDuration(message.serverDecodeMs)}`;
         setStatus("ready", "Ready · hover to segment");
         return;
       }
@@ -286,8 +358,8 @@ if (
     }
   }
 
-  function loadActiveExample(): void {
-    if (!modelReady) return;
+  function loadActiveImage(): void {
+    if (!modelReady || !activeImage) return;
     imageReady = false;
     imageStage.classList.add("disabled");
     setStatus("loading", "Encoding image…");
@@ -298,7 +370,8 @@ if (
     postWorker({
       type: "load-image",
       imageRevision,
-      url: activeExample.url,
+      imageId: activeImage.id,
+      url: activeImage.url,
     });
   }
 
@@ -381,9 +454,85 @@ if (
     });
   }
 
-  function chooseExample(example: ExampleImage): void {
-    if (example.id === activeExample.id) return;
-    activeExample = example;
+  async function refreshData(): Promise<void> {
+    refreshDataButton.disabled = true;
+    dataSummary.textContent = "Scanning data/…";
+
+    try {
+      const response = await fetch("/api/data-tree?refresh=true", {
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error(`Data scan failed with HTTP ${response.status}.`);
+      }
+
+      const nextRoot = (await response.json()) as DataFolder;
+      const previousFolderPath = currentFolder?.path;
+      const previousImagePath = activeImage?.path;
+      dataRoot = nextRoot;
+
+      const nextFolder =
+        (previousFolderPath
+          ? findFolder(nextRoot, previousFolderPath)
+          : undefined) ??
+        firstFolderWithImages(nextRoot) ??
+        nextRoot;
+      const preferredImage = nextFolder.images.find(
+        ({ path }) => path === previousImagePath,
+      );
+      selectFolder(
+        nextFolder,
+        preferredImage?.path,
+      );
+
+      const folderCount = flattenFolders(nextRoot).length - 1;
+      const imageCount = countImages(nextRoot);
+      dataSummary.textContent = `${imageCount} image${
+        imageCount === 1 ? "" : "s"
+      } in ${folderCount} folder${folderCount === 1 ? "" : "s"}.`;
+    } catch (error) {
+      dataRoot = null;
+      currentFolder = null;
+      activeImage = null;
+      renderDataBrowser();
+      dataSummary.textContent =
+        error instanceof Error ? error.message : String(error);
+      setStatus("error", "Unable to scan data/");
+      showNotice(
+        "Unable to read data/",
+        "Check the terminal running Vite, then rescan the folder.",
+      );
+    } finally {
+      refreshDataButton.disabled = false;
+    }
+  }
+
+  function selectFolder(
+    folder: DataFolder,
+    preferredImagePath?: string,
+  ): void {
+    currentFolder = folder;
+    expandAncestors(folder.path);
+    const image =
+      folder.images.find(({ path }) => path === preferredImagePath) ??
+      folder.images[0] ??
+      null;
+
+    if (image) {
+      selectImage(image);
+    } else {
+      clearActiveImage();
+      renderDataBrowser();
+    }
+  }
+
+  function selectImage(image: DataImage): void {
+    if (activeImage?.path === image.path) {
+      renderDataBrowser();
+      return;
+    }
+
+    activeImage = image;
     imageRevision += 1;
     stateRevision = 0;
     pinnedPoints = clearPoints();
@@ -393,22 +542,140 @@ if (
     lastPromptKey = null;
     encodeMetric.textContent = "—";
     decodeMetric.textContent = "—";
-    setExampleImage(example);
-    renderExampleButtons();
+    setDataImage(image);
+    renderDataBrowser();
     renderMarkers();
     updatePointControls();
-    loadActiveExample();
+    loadActiveImage();
   }
 
-  exampleList.addEventListener("click", (event) => {
-    const target = (event.target as HTMLElement).closest<HTMLButtonElement>(
-      "[data-example-id]",
+  function clearActiveImage(): void {
+    activeImage = null;
+    imageRevision += 1;
+    stateRevision = 0;
+    imageReady = false;
+    pinnedPoints = clearPoints();
+    hoverPoint = null;
+    pointerInside = false;
+    latestPointer = null;
+    lastPromptKey = null;
+    displayImageSize = null;
+    sourceImage.removeAttribute("src");
+    sourceImage.alt = "No image selected";
+    viewerTitle.textContent = currentFolder?.name ?? "No image selected";
+    encodeMetric.textContent = "—";
+    decodeMetric.textContent = "—";
+    imageFrame.style.width = "100%";
+    imageStage.style.width = "100%";
+    imageStage.style.height = "420px";
+    imageStage.style.aspectRatio = "auto";
+    imageStage.classList.add("disabled");
+    renderMarkers();
+    updatePointControls();
+    postWorker({
+      type: "clear",
+      imageRevision,
+      stateRevision,
+    });
+    showNotice(
+      "No images in this folder",
+      "Choose another folder or add supported image files directly inside it.",
     );
-    const example = EXAMPLES.find(
-      ({ id }) => id === target?.dataset.exampleId,
-    );
-    if (example) chooseExample(example);
+    setStatus("ready", "Folder selected · no images");
+  }
+
+  function moveSelection(offset: -1 | 1): void {
+    if (!dataRoot || !currentFolder) return;
+    if (navigationMode === "folder") {
+      const folder = adjacentFolder(dataRoot, currentFolder, offset);
+      if (folder) selectFolder(folder);
+      return;
+    }
+
+    const image = adjacentImage(currentFolder, activeImage, offset);
+    if (image) selectImage(image);
+  }
+
+  folderTreeTrigger.addEventListener("click", () => {
+    setFolderTreeOpen(folderTreeMenu.hidden);
   });
+
+  folderTree.addEventListener("click", (event) => {
+    if (!dataRoot) return;
+    const target = event.target as HTMLElement;
+    const expandButton =
+      target.closest<HTMLButtonElement>("[data-expand-folder]");
+    if (expandButton) {
+      const path = expandButton.dataset.expandFolder ?? "";
+      if (expandedFolderPaths.has(path)) {
+        expandedFolderPaths.delete(path);
+      } else {
+        expandedFolderPaths.add(path);
+      }
+      renderFolderTree();
+      return;
+    }
+
+    const folderButton =
+      target.closest<HTMLButtonElement>("[data-folder-path]");
+    if (!folderButton) return;
+    const folder = findFolder(
+      dataRoot,
+      folderButton.dataset.folderPath ?? "",
+    );
+    if (folder) {
+      selectFolder(folder);
+      setFolderTreeOpen(false);
+    }
+  });
+
+  imageSelect.addEventListener("change", () => {
+    const image = currentFolder?.images.find(
+      ({ path }) => path === imageSelect.value,
+    );
+    if (image) selectImage(image);
+  });
+
+  navigateFolders.addEventListener("click", () => {
+    setNavigationMode("folder");
+  });
+  navigateImages.addEventListener("click", () => {
+    setNavigationMode("image");
+  });
+  previousButton.addEventListener("click", () => moveSelection(-1));
+  nextButton.addEventListener("click", () => moveSelection(1));
+  refreshDataButton.addEventListener("click", () => void refreshData());
+
+  folderCrumbs.addEventListener("click", (event) => {
+    if (!dataRoot) return;
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>(
+      "[data-folder-path]",
+    );
+    if (!button) return;
+    const folder = findFolder(
+      dataRoot,
+      button.dataset.folderPath ?? "",
+    );
+    if (folder) selectFolder(folder);
+  });
+
+  document.addEventListener("pointerdown", (event) => {
+    if (
+      !folderTreeMenu.hidden &&
+      !folderTreePicker.contains(event.target as Node)
+    ) {
+      setFolderTreeOpen(false);
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") setFolderTreeOpen(false);
+  });
+
+  function setNavigationMode(mode: NavigationMode): void {
+    navigationMode = mode;
+    renderDataBrowser();
+  }
 
   positiveTool.addEventListener("click", () => {
     setTool(1);
@@ -462,30 +729,178 @@ function setTool(label: PointLabel): void {
   }
 }
 
-function renderExampleButtons(): void {
-  exampleList.innerHTML = EXAMPLES.map(
-    (example, index) => `
-      <button
-        class="example-button ${example.id === activeExample.id ? "active" : ""}"
-        type="button"
-        data-example-id="${example.id}"
-        aria-pressed="${example.id === activeExample.id}"
-      >
-        <span class="example-number">0${index + 1}</span>
-        <span>
-          <strong>${example.label}</strong>
-          <small>${example.description}</small>
-        </span>
-        <span class="example-arrow" aria-hidden="true">↗</span>
-      </button>
-    `,
-  ).join("");
+function renderDataBrowser(): void {
+  imageSelect.replaceChildren();
+  folderCrumbs.replaceChildren();
+  folderTree.replaceChildren();
+
+  if (!dataRoot || !currentFolder) {
+    folderTreeValue.textContent = "No data folders";
+    folderTreeTrigger.disabled = true;
+    setFolderTreeOpen(false);
+    imageSelect.append(new Option("No images", ""));
+    imageSelect.disabled = true;
+    previousButton.disabled = true;
+    nextButton.disabled = true;
+    navigateFolders.disabled = true;
+    navigateImages.disabled = true;
+    return;
+  }
+
+  folderTreeTrigger.disabled = false;
+  folderTreeValue.textContent = currentFolder.path
+    ? `Data / ${currentFolder.path}`
+    : "Data";
+  renderFolderTree();
+
+  if (currentFolder.images.length === 0) {
+    imageSelect.append(new Option("No images in this folder", ""));
+    imageSelect.disabled = true;
+  } else {
+    for (const image of currentFolder.images) {
+      imageSelect.append(new Option(image.name, image.path));
+    }
+    imageSelect.value = activeImage?.path ?? "";
+    imageSelect.disabled = false;
+  }
+
+  const crumbs = folderBreadcrumbs(dataRoot, currentFolder);
+  crumbs.forEach((folder, index) => {
+    if (index > 0) {
+      const separator = document.createElement("span");
+      separator.textContent = "/";
+      separator.className = "crumb-separator";
+      folderCrumbs.append(separator);
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = folder.name;
+    button.dataset.folderPath = folder.path;
+    button.disabled = folder.path === currentFolder?.path;
+    folderCrumbs.append(button);
+  });
+
+  const previous =
+    navigationMode === "folder"
+      ? adjacentFolder(dataRoot, currentFolder, -1)
+      : adjacentImage(currentFolder, activeImage, -1);
+  const next =
+    navigationMode === "folder"
+      ? adjacentFolder(dataRoot, currentFolder, 1)
+      : adjacentImage(currentFolder, activeImage, 1);
+  previousButton.disabled = !previous;
+  nextButton.disabled = !next;
+  navigateFolders.disabled = false;
+  navigateImages.disabled = !activeImage;
+  navigateFolders.classList.toggle(
+    "active",
+    navigationMode === "folder",
+  );
+  navigateFolders.setAttribute(
+    "aria-pressed",
+    String(navigationMode === "folder"),
+  );
+  navigateImages.classList.toggle("active", navigationMode === "image");
+  navigateImages.setAttribute(
+    "aria-pressed",
+    String(navigationMode === "image"),
+  );
 }
 
-function setExampleImage(example: ExampleImage): void {
-  sourceImage.src = example.url;
-  sourceImage.alt = example.description;
-  viewerTitle.textContent = example.description;
+function renderFolderTree(): void {
+  folderTree.replaceChildren();
+  if (!dataRoot || !currentFolder) return;
+  folderTree.append(createFolderTreeNode(dataRoot, currentFolder, 0));
+}
+
+function createFolderTreeNode(
+  folder: DataFolder,
+  selectedFolder: DataFolder,
+  depth: number,
+): HTMLDivElement {
+  const branch = document.createElement("div");
+  branch.className = "tree-branch";
+  branch.setAttribute("role", "treeitem");
+  branch.setAttribute(
+    "aria-expanded",
+    String(expandedFolderPaths.has(folder.path)),
+  );
+  branch.setAttribute(
+    "aria-selected",
+    String(folder.path === selectedFolder.path),
+  );
+
+  const row = document.createElement("div");
+  row.className = "tree-row";
+  row.style.paddingLeft = `${depth * 14 + 6}px`;
+
+  if (folder.folders.length > 0) {
+    const expander = document.createElement("button");
+    expander.type = "button";
+    expander.className = "tree-expander";
+    expander.dataset.expandFolder = folder.path;
+    expander.textContent = expandedFolderPaths.has(folder.path) ? "▾" : "▸";
+    expander.setAttribute(
+      "aria-label",
+      `${expandedFolderPaths.has(folder.path) ? "Collapse" : "Expand"} ${folder.name}`,
+    );
+    row.append(expander);
+  } else {
+    const spacer = document.createElement("span");
+    spacer.className = "tree-expander-spacer";
+    row.append(spacer);
+  }
+
+  const folderButton = document.createElement("button");
+  folderButton.type = "button";
+  folderButton.className = "tree-folder";
+  folderButton.dataset.folderPath = folder.path;
+  folderButton.classList.toggle(
+    "active",
+    folder.path === selectedFolder.path,
+  );
+  folderButton.innerHTML = `<span aria-hidden="true">▱</span>${escapeHtml(
+    folder.name,
+  )}`;
+  row.append(folderButton);
+  branch.append(row);
+
+  if (
+    folder.folders.length > 0 &&
+    expandedFolderPaths.has(folder.path)
+  ) {
+    const children = document.createElement("div");
+    children.className = "tree-children";
+    children.setAttribute("role", "group");
+    folder.folders.forEach((child) => {
+      children.append(createFolderTreeNode(child, selectedFolder, depth + 1));
+    });
+    branch.append(children);
+  }
+
+  return branch;
+}
+
+function expandAncestors(path: string): void {
+  expandedFolderPaths.add("");
+  const segments = path.split("/").filter(Boolean);
+  for (let index = 0; index < segments.length; index += 1) {
+    expandedFolderPaths.add(segments.slice(0, index + 1).join("/"));
+  }
+}
+
+function setFolderTreeOpen(open: boolean): void {
+  if (folderTreeTrigger.disabled) open = false;
+  folderTreeMenu.hidden = !open;
+  folderTreeTrigger.setAttribute("aria-expanded", String(open));
+  folderTreePicker.classList.toggle("open", open);
+  if (open) renderFolderTree();
+}
+
+function setDataImage(image: DataImage): void {
+  sourceImage.src = image.url;
+  sourceImage.alt = image.name;
+  viewerTitle.textContent = image.name;
 }
 
 function setStageSize(width: number, height: number): void {
@@ -578,6 +993,25 @@ function showStageMessage(title: string, detail: string): void {
     <strong>${title}</strong>
     <small>${detail}</small>
   `;
+}
+
+function showNotice(title: string, detail: string): void {
+  stageMessage.classList.remove("hidden", "error");
+  stageMessage.innerHTML = `
+    <span class="notice-symbol">⌁</span>
+    <strong>${escapeHtml(title)}</strong>
+    <small>${escapeHtml(detail)}</small>
+  `;
+}
+
+function countImages(folder: DataFolder): number {
+  return (
+    folder.images.length +
+    folder.folders.reduce(
+      (total, child) => total + countImages(child),
+      0,
+    )
+  );
 }
 
 function showFatal(message: string, label = "Runtime error"): void {
