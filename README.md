@@ -65,6 +65,12 @@ Supported file extensions are PNG, JPEG, WebP, GIF, BMP, TIFF, and AVIF.
 - Choose **Positive** or **Negative** to change the temporary point type.
 - Click to pin the current point.
 - Use **Undo** or **Clear all** to revise pinned prompts.
+- After a mask is generated, choose **Marker** or **Eraser** and hold-drag to
+  refine it with independent source-pixel brush sizes.
+- **Invert mask** shows the exact complement. **Undo edit** reverts one whole
+  stroke or inversion, while **Reset edits** returns to the latest SAM mask.
+- Manual edits stay applied when SAM produces a newer mask and reset when you
+  change images. Brush edits never call the H100 service.
 
 The files under `sam3-q4/` must remain in their existing layout because both
 ONNX graphs reference their adjacent `.onnx_data` files by name.

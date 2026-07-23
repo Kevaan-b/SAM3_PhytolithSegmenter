@@ -6,6 +6,14 @@ export interface PointPrompt {
   label: PointLabel;
 }
 
+export type BrushOperation = "add" | "erase";
+export type BrushPhase = "begin" | "continue" | "end";
+
+export interface MaskPoint {
+  x: number;
+  y: number;
+}
+
 export type MainToWorkerMessage =
   | {
       type: "initialize";
@@ -27,6 +35,21 @@ export type MainToWorkerMessage =
       type: "clear";
       imageRevision: number;
       stateRevision: number;
+    }
+  | {
+      type: "brush";
+      imageRevision: number;
+      editRevision: number;
+      strokeId: number;
+      phase: BrushPhase;
+      operation: BrushOperation;
+      radius: number;
+      points: MaskPoint[];
+    }
+  | {
+      type: "invert-mask" | "undo-edit" | "reset-edits";
+      imageRevision: number;
+      editRevision: number;
     };
 
 export type WorkerToMainMessage =
@@ -62,7 +85,7 @@ export type WorkerToMainMessage =
     }
   | {
       type: "error";
-      phase: "initialization" | "image" | "decode";
+      phase: "initialization" | "image" | "decode" | "edit";
       message: string;
       imageRevision?: number;
       stateRevision?: number;
@@ -76,4 +99,13 @@ export type WorkerToMainMessage =
       total: number;
       gpuResident: number;
       queueDepth: number;
+    }
+  | {
+      type: "edit-state";
+      imageRevision: number;
+      editRevision: number;
+      hasMask: boolean;
+      hasEdits: boolean;
+      canUndo: boolean;
+      inverted: boolean;
     };

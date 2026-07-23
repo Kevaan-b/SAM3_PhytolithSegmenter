@@ -477,6 +477,11 @@ button:focus-visible {
   box-shadow: 0 6px 18px rgba(47, 61, 52, 0.05);
 }
 
+.tool-button:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
 .tool-icon {
   display: grid;
   width: 20px;
@@ -494,6 +499,17 @@ button:focus-visible {
 
 .tool-icon.negative {
   background: var(--red);
+}
+
+.tool-icon.marker-icon {
+  color: white;
+  background: #4094dc;
+}
+
+.tool-icon.eraser-icon {
+  color: #4094dc;
+  background: white;
+  border: 2px solid #4094dc;
 }
 
 .tool-hint {
@@ -533,6 +549,49 @@ button:focus-visible {
   margin-left: auto;
   color: #929a94;
   font-size: 10px;
+}
+
+.mask-edit-section {
+  margin-top: 20px;
+}
+
+.brush-controls {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+}
+
+.brush-controls label {
+  display: flex;
+  justify-content: space-between;
+  color: #707a73;
+  font-size: 9px;
+}
+
+.brush-controls output {
+  color: #4f5952;
+  font-variant-numeric: tabular-nums;
+}
+
+.brush-controls input[type="range"] {
+  width: 100%;
+  accent-color: #4094dc;
+}
+
+.brush-controls input:disabled {
+  opacity: 0.35;
+}
+
+.mask-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-top: 14px;
+}
+
+.mask-actions .text-button.active {
+  color: #286b9f;
+  font-weight: 600;
 }
 
 .viewer-panel {
@@ -638,6 +697,10 @@ button:focus-visible {
   pointer-events: none;
 }
 
+.image-stage.brush-mode {
+  cursor: none;
+}
+
 .image-stage img {
   display: block;
   width: 100%;
@@ -661,6 +724,28 @@ button:focus-visible {
 
 .marker-layer {
   pointer-events: none;
+}
+
+.brush-cursor {
+  position: absolute;
+  z-index: 4;
+  display: none;
+  box-sizing: border-box;
+  pointer-events: none;
+  border: 2px solid rgba(33, 123, 191, 0.95);
+  border-radius: 50%;
+  background: rgba(64, 148, 220, 0.12);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.85);
+  transform: translate(-50%, -50%);
+}
+
+.brush-cursor.visible {
+  display: block;
+}
+
+.brush-cursor.eraser {
+  border-color: rgba(207, 75, 75, 0.95);
+  background: rgba(207, 75, 75, 0.1);
 }
 
 .marker {

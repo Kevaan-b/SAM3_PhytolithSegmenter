@@ -273,5 +273,118 @@ describe("browser UI with a mocked inference worker", () => {
       "0 pinned",
     );
     expect(worker.messages.at(-1)).toMatchObject({ type: "clear" });
+
+    worker.emit({
+      type: "edit-state",
+      imageRevision: latestLoad.imageRevision,
+      editRevision: 0,
+      hasMask: true,
+      hasEdits: false,
+      canUndo: false,
+      inverted: false,
+    });
+    const markerTool = document.querySelector<HTMLButtonElement>("#marker-tool")!;
+    const eraserTool = document.querySelector<HTMLButtonElement>("#eraser-tool")!;
+    const markerSize = document.querySelector<HTMLInputElement>("#marker-size")!;
+    const eraserSize = document.querySelector<HTMLInputElement>("#eraser-size")!;
+    expect(markerTool.disabled).toBe(false);
+
+    markerSize.value = "40";
+    markerSize.dispatchEvent(new Event("input", { bubbles: true }));
+    markerTool.click();
+    expect(markerTool.getAttribute("aria-pressed")).toBe("true");
+
+    const messagesBeforeHover = worker.messages.length;
+    stage.dispatchEvent(pointerEvent("pointerenter", 9, 110, 70));
+    stage.dispatchEvent(pointerEvent("pointermove", 9, 120, 70));
+    expect(worker.messages).toHaveLength(messagesBeforeHover);
+    expect(
+      document.querySelector<HTMLDivElement>("#brush-cursor")!.style.width,
+    ).toBe(`${40 * (200 / 982)}px`);
+
+    const setPointerCapture = vi.fn();
+    const releasePointerCapture = vi.fn();
+    Object.defineProperty(stage, "setPointerCapture", { value: setPointerCapture });
+    Object.defineProperty(stage, "releasePointerCapture", { value: releasePointerCapture });
+    stage.dispatchEvent(pointerEvent("pointerdown", 9, 110, 70));
+    expect(setPointerCapture).toHaveBeenCalledWith(9);
+    expect(worker.messages.at(-1)).toMatchObject({
+      type: "brush",
+      phase: "begin",
+      operation: "add",
+      radius: 20,
+      points: [{ x: 0.5, y: 0.5 }],
+    });
+    stage.dispatchEvent(pointerEvent("pointermove", 9, 160, 70));
+    expect(worker.messages.at(-1)).toMatchObject({
+      type: "brush",
+      phase: "continue",
+    });
+    stage.dispatchEvent(pointerEvent("pointerup", 9, 160, 70));
+    expect(worker.messages.at(-1)).toMatchObject({
+      type: "brush",
+      phase: "end",
+    });
+    expect(releasePointerCapture).toHaveBeenCalledWith(9);
+
+    worker.emit({
+      type: "edit-state",
+      imageRevision: latestLoad.imageRevision,
+      editRevision: 1,
+      hasMask: true,
+      hasEdits: true,
+      canUndo: true,
+      inverted: false,
+    });
+    document.querySelector<HTMLButtonElement>("#invert-mask")!.click();
+    expect(worker.messages.at(-1)).toMatchObject({ type: "invert-mask" });
+    worker.emit({
+      type: "edit-state",
+      imageRevision: latestLoad.imageRevision,
+      editRevision: 2,
+      hasMask: true,
+      hasEdits: true,
+      canUndo: true,
+      inverted: true,
+    });
+    expect(
+      document.querySelector<HTMLButtonElement>("#invert-mask")!
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+    document.querySelector<HTMLButtonElement>("#undo-edit")!.click();
+    expect(worker.messages.at(-1)).toMatchObject({ type: "undo-edit" });
+    document.querySelector<HTMLButtonElement>("#reset-edits")!.click();
+    expect(worker.messages.at(-1)).toMatchObject({ type: "reset-edits" });
+
+    eraserSize.value = "60";
+    eraserSize.dispatchEvent(new Event("input", { bubbles: true }));
+    eraserTool.click();
+    stage.dispatchEvent(pointerEvent("pointerdown", 10, 110, 70));
+    expect(worker.messages.at(-1)).toMatchObject({
+      type: "brush",
+      phase: "begin",
+      operation: "erase",
+      radius: 30,
+    });
+    expect(markerSize.value).toBe("40");
   });
 });
+
+function pointerEvent(
+  type: string,
+  pointerId: number,
+  clientX: number,
+  clientY: number,
+): MouseEvent {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    button: 0,
+    clientX,
+    clientY,
+  });
+  Object.defineProperty(event, "pointerId", { value: pointerId });
+  Object.defineProperty(event, "getCoalescedEvents", {
+    value: () => [event],
+  });
+  return event;
+}

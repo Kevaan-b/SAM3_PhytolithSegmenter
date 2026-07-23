@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 
 import type { MainToWorkerMessage, WorkerToMainMessage } from "./protocol";
+import { MaskEditor } from "./mask-editor";
 
 type LoadImageMessage = Extract<MainToWorkerMessage, { type: "load-image" }>;
 type DecodeMessage = Extract<MainToWorkerMessage, { type: "decode" }>;
@@ -18,6 +19,8 @@ let pendingImage: LoadImageMessage | undefined;
 let pendingDecode: DecodeMessage | undefined;
 let activePrepare: AbortController | undefined;
 const latestStateRevision = new Map<number, number>();
+const maskEditor = new MaskEditor(100);
+let activeStrokeId = -1;
 
 worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
   switch (data.type) {
@@ -51,6 +54,47 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
       if (pendingDecode?.imageRevision === data.imageRevision) pendingDecode = undefined;
       clearOverlay();
       post({ type: "overlay-cleared", imageRevision: data.imageRevision, stateRevision: data.stateRevision });
+      postEditState(data.imageRevision, 0);
+      return;
+    }
+    case "brush": {
+      if (data.imageRevision !== activeImageRevision || data.imageRevision !== desiredImageRevision) return;
+      try {
+        if (data.phase === "begin") {
+          const first = data.points[0];
+          if (!first) return;
+          activeStrokeId = data.strokeId;
+          maskEditor.beginStroke(data.operation, data.radius, first);
+          maskEditor.extendStroke(data.points.slice(1));
+        } else if (data.strokeId === activeStrokeId) {
+          if (data.phase === "continue") {
+            maskEditor.extendStroke(data.points);
+          } else {
+            maskEditor.endStroke(data.points);
+            activeStrokeId = -1;
+            postEditState(data.imageRevision, data.editRevision);
+          }
+        }
+        renderMask();
+      } catch (error) {
+        postError("edit", error, data.imageRevision);
+      }
+      return;
+    }
+    case "invert-mask":
+    case "undo-edit":
+    case "reset-edits": {
+      if (data.imageRevision !== activeImageRevision || data.imageRevision !== desiredImageRevision) return;
+      try {
+        if (data.type === "invert-mask") maskEditor.toggleInvert();
+        if (data.type === "undo-edit") maskEditor.undo();
+        if (data.type === "reset-edits") maskEditor.resetEdits();
+        renderMask();
+        postEditState(data.imageRevision, data.editRevision);
+      } catch (error) {
+        postError("edit", error, data.imageRevision);
+      }
+      return;
     }
   }
 };
@@ -167,6 +211,8 @@ function prepareOverlay(width: number, height: number): void {
   if (!canvas || !context) throw new Error("Overlay canvas is unavailable.");
   canvas.width = width;
   canvas.height = height;
+  maskEditor.resetImage(width, height);
+  activeStrokeId = -1;
   pixels = context.createImageData(width, height);
   for (let index = 0; index < width * height; index += 1) {
     pixels.data[index * 4] = 64;
@@ -179,14 +225,25 @@ function drawMask(mask: Uint8Array, width: number, height: number): void {
   if (!canvas || !context || !pixels || canvas.width !== width || canvas.height !== height) return;
   const count = width * height;
   if (mask.byteLength !== Math.ceil(count / 8)) throw new Error("The H100 service returned an invalid mask size.");
-  for (let index = 0; index < count; index += 1) {
-    pixels.data[index * 4 + 3] = (mask[index >> 3]! & (1 << (index & 7))) !== 0 ? 126 : 0;
-  }
+  maskEditor.setBaseMask(mask);
+  renderMask();
+  postEditState(activeImageRevision, 0);
+}
+
+function renderMask(): void {
+  if (!context || !pixels) return;
+  maskEditor.writeAlpha(pixels.data, 126);
   context.putImageData(pixels, 0, 0);
 }
 
 function clearOverlay(): void {
+  maskEditor.clearMask();
+  activeStrokeId = -1;
   if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function postEditState(imageRevision: number, editRevision: number): void {
+  post({ type: "edit-state", imageRevision, editRevision, ...maskEditor.state() });
 }
 
 function headerNumber(response: Response, name: string): number {

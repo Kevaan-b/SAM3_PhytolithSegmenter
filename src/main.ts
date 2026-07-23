@@ -20,11 +20,15 @@ import {
   type NavigationMode,
 } from "./data-navigator";
 import type {
+  BrushOperation,
   MainToWorkerMessage,
+  MaskPoint,
   PointLabel,
   PointPrompt,
   WorkerToMainMessage,
 } from "./protocol";
+
+type ActiveTool = "positive" | "negative" | "marker" | "eraser";
 
 document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
   <div class="app-shell">
@@ -131,6 +135,38 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           </button>
           <span class="point-count" id="point-count">0 pinned</span>
         </div>
+
+        <section class="control-section mask-edit-section">
+          <div class="section-heading">
+            <span>03</span>
+            <h2>Refine mask</h2>
+          </div>
+          <div class="tool-switch" role="group" aria-label="Mask brush">
+            <button class="tool-button" id="marker-tool" type="button" aria-pressed="false" disabled>
+              <span class="tool-icon marker-icon">●</span>
+              Marker
+            </button>
+            <button class="tool-button" id="eraser-tool" type="button" aria-pressed="false" disabled>
+              <span class="tool-icon eraser-icon">○</span>
+              Eraser
+            </button>
+          </div>
+          <div class="brush-controls">
+            <label for="marker-size">
+              <span>Marker size</span><output id="marker-size-value">20 px</output>
+            </label>
+            <input id="marker-size" type="range" min="2" max="200" step="2" value="20" />
+            <label for="eraser-size">
+              <span>Eraser size</span><output id="eraser-size-value">32 px</output>
+            </label>
+            <input id="eraser-size" type="range" min="2" max="200" step="2" value="32" />
+          </div>
+          <div class="mask-actions">
+            <button class="text-button" id="invert-mask" type="button" aria-pressed="false" disabled>◐ Invert mask</button>
+            <button class="text-button" id="undo-edit" type="button" disabled>↶ Undo edit</button>
+            <button class="text-button" id="reset-edits" type="button" disabled>× Reset edits</button>
+          </div>
+        </section>
       </aside>
 
       <section class="viewer-panel" aria-label="Interactive segmentation viewer">
@@ -154,6 +190,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
             <img id="source-image" alt="Selected data image" draggable="false" />
             <canvas id="mask-overlay" aria-hidden="true"></canvas>
             <div class="marker-layer" id="marker-layer" aria-hidden="true"></div>
+            <div class="brush-cursor" id="brush-cursor" aria-hidden="true"></div>
             <div class="stage-message" id="stage-message">
               <span class="loader"></span>
               <strong>Connecting to the H100</strong>
@@ -167,7 +204,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         </div>
 
         <div class="viewer-footer">
-          <p><span class="cursor-symbol">⌖</span> Hover to preview · Click to pin</p>
+          <p id="interaction-hint"><span class="cursor-symbol">⌖</span> Hover to preview · Click to pin</p>
           <dl class="metrics">
             <div><dt>Encoder</dt><dd id="encode-metric">—</dd></div>
             <div><dt>Last decode</dt><dd id="decode-metric">—</dd></div>
@@ -198,6 +235,15 @@ const overlay = getElement<HTMLCanvasElement>("mask-overlay");
 const markerLayer = getElement<HTMLDivElement>("marker-layer");
 const positiveTool = getElement<HTMLButtonElement>("positive-tool");
 const negativeTool = getElement<HTMLButtonElement>("negative-tool");
+const markerTool = getElement<HTMLButtonElement>("marker-tool");
+const eraserTool = getElement<HTMLButtonElement>("eraser-tool");
+const markerSize = getElement<HTMLInputElement>("marker-size");
+const eraserSize = getElement<HTMLInputElement>("eraser-size");
+const markerSizeValue = getElement<HTMLOutputElement>("marker-size-value");
+const eraserSizeValue = getElement<HTMLOutputElement>("eraser-size-value");
+const invertMaskButton = getElement<HTMLButtonElement>("invert-mask");
+const undoEditButton = getElement<HTMLButtonElement>("undo-edit");
+const resetEditsButton = getElement<HTMLButtonElement>("reset-edits");
 const toolHint = getElement<HTMLParagraphElement>("tool-hint");
 const undoButton = getElement<HTMLButtonElement>("undo-button");
 const clearButton = getElement<HTMLButtonElement>("clear-button");
@@ -211,13 +257,29 @@ const stageMessage = getElement<HTMLDivElement>("stage-message");
 const imageFrame = getElement<HTMLDivElement>("image-frame");
 const encodeMetric = getElement<HTMLElement>("encode-metric");
 const decodeMetric = getElement<HTMLElement>("decode-metric");
+const brushCursor = getElement<HTMLDivElement>("brush-cursor");
+const interactionHint = getElement<HTMLParagraphElement>("interaction-hint");
 
 let dataRoot: DataFolder | null = null;
 let currentFolder: DataFolder | null = null;
 let activeImage: DataImage | null = null;
 let navigationMode: NavigationMode = "folder";
 const expandedFolderPaths = new Set<string>([""]);
-let activeTool: PointLabel = 1;
+let activeTool: ActiveTool = "positive";
+let markerDiameter = 20;
+let eraserDiameter = 32;
+let maskAvailable = false;
+let maskHasEdits = false;
+let maskCanUndo = false;
+let maskInverted = false;
+let editRevision = 0;
+let nextStrokeId = 0;
+let activeStroke: {
+  pointerId: number;
+  strokeId: number;
+  operation: BrushOperation;
+  radius: number;
+} | null = null;
 let pinnedPoints: PointPrompt[] = [];
 let hoverPoint: PointPrompt | null = null;
 let pointerInside = false;
@@ -242,6 +304,7 @@ window.addEventListener("resize", () => {
 });
 renderDataBrowser();
 updatePointControls();
+updateEditingControls();
 
 if (
   !("Worker" in window) ||
@@ -346,6 +409,16 @@ if (
       case "overlay-cleared":
         return;
 
+      case "edit-state": {
+        if (message.imageRevision !== imageRevision) return;
+        maskAvailable = message.hasMask;
+        maskHasEdits = message.hasEdits;
+        maskCanUndo = message.canUndo;
+        maskInverted = message.inverted;
+        updateEditingControls();
+        return;
+      }
+
       case "error": {
         if (
           message.imageRevision !== undefined &&
@@ -402,13 +475,24 @@ if (
   imageStage.addEventListener("pointerenter", (event) => {
     if (!imageReady) return;
     pointerInside = true;
-    queuePointer(event.clientX, event.clientY);
+    if (isBrushTool(activeTool)) {
+      updateBrushCursor(event.clientX, event.clientY);
+    } else {
+      queuePointer(event.clientX, event.clientY);
+    }
   });
 
   imageStage.addEventListener("pointermove", (event) => {
     if (!imageReady) return;
     pointerInside = true;
-    queuePointer(event.clientX, event.clientY);
+    if (isBrushTool(activeTool)) {
+      updateBrushCursor(event.clientX, event.clientY);
+      if (activeStroke?.pointerId === event.pointerId) {
+        postBrush("continue", activeStroke.strokeId, brushPoints(event));
+      }
+    } else {
+      queuePointer(event.clientX, event.clientY);
+    }
   });
 
   imageStage.addEventListener("pointerleave", () => {
@@ -416,18 +500,43 @@ if (
     latestPointer = null;
     hoverPoint = null;
     removeHoverMarker();
+    hideBrushCursor();
+    if (isBrushTool(activeTool)) return;
     lastPromptKey = null;
     submitPrompts(pinnedPoints);
   });
 
+  imageStage.addEventListener("pointerdown", (event) => {
+    if (
+      !imageReady ||
+      !maskAvailable ||
+      !isBrushTool(activeTool) ||
+      event.button !== 0
+    ) return;
+    event.preventDefault();
+    imageStage.setPointerCapture?.(event.pointerId);
+    editRevision += 1;
+    const strokeId = ++nextStrokeId;
+    activeStroke = {
+      pointerId: event.pointerId,
+      strokeId,
+      operation: brushOperation(activeTool),
+      radius: activeBrushDiameter() / 2,
+    };
+    postBrush("begin", strokeId, [normalizeEventPoint(event)]);
+  });
+
+  imageStage.addEventListener("pointerup", finishBrushStroke);
+  imageStage.addEventListener("pointercancel", finishBrushStroke);
+
   imageStage.addEventListener("click", (event) => {
-    if (!imageReady || !pointerInside) return;
+    if (!imageReady || !pointerInside || !isPointTool(activeTool)) return;
     const normalized = normalizePointer(
       event.clientX,
       event.clientY,
       imageStage.getBoundingClientRect(),
     );
-    pinnedPoints.push({ ...normalized, label: activeTool });
+    pinnedPoints.push({ ...normalized, label: pointLabel(activeTool) });
     hoverPoint = null;
     latestPointer = null;
     lastPromptKey = null;
@@ -442,16 +551,59 @@ if (
 
     animationFrame = requestAnimationFrame(() => {
       animationFrame = 0;
-      if (!latestPointer || !pointerInside || !imageReady) return;
+      if (
+        !latestPointer ||
+        !pointerInside ||
+        !imageReady ||
+        !isPointTool(activeTool)
+      ) return;
       const normalized = normalizePointer(
         latestPointer.clientX,
         latestPointer.clientY,
         imageStage.getBoundingClientRect(),
       );
-      hoverPoint = { ...normalized, label: activeTool };
+      hoverPoint = { ...normalized, label: pointLabel(activeTool) };
       updateHoverMarker(hoverPoint);
       submitPrompts([...pinnedPoints, hoverPoint]);
     });
+  }
+
+  function finishBrushStroke(event: PointerEvent): void {
+    if (!activeStroke || activeStroke.pointerId !== event.pointerId) return;
+    postBrush("end", activeStroke.strokeId, [normalizeEventPoint(event)]);
+    imageStage.releasePointerCapture?.(event.pointerId);
+    activeStroke = null;
+  }
+
+  function postBrush(
+    phase: "begin" | "continue" | "end",
+    strokeId: number,
+    points: MaskPoint[],
+  ): void {
+    if (!activeStroke || activeStroke.strokeId !== strokeId) return;
+    postWorker({
+      type: "brush",
+      imageRevision,
+      editRevision,
+      strokeId,
+      phase,
+      operation: activeStroke.operation,
+      radius: activeStroke.radius,
+      points,
+    });
+  }
+
+  function brushPoints(event: PointerEvent): MaskPoint[] {
+    const events = event.getCoalescedEvents?.() ?? [event];
+    return events.map(normalizeEventPoint);
+  }
+
+  function normalizeEventPoint(event: PointerEvent): MaskPoint {
+    return normalizePointer(
+      event.clientX,
+      event.clientY,
+      imageStage.getBoundingClientRect(),
+    );
   }
 
   async function refreshData(): Promise<void> {
@@ -535,6 +687,7 @@ if (
     activeImage = image;
     imageRevision += 1;
     stateRevision = 0;
+    resetMaskUiState();
     pinnedPoints = clearPoints();
     hoverPoint = null;
     pointerInside = false;
@@ -553,6 +706,7 @@ if (
     activeImage = null;
     imageRevision += 1;
     stateRevision = 0;
+    resetMaskUiState();
     imageReady = false;
     pinnedPoints = clearPoints();
     hoverPoint = null;
@@ -678,18 +832,47 @@ if (
   }
 
   positiveTool.addEventListener("click", () => {
-    setTool(1);
+    setTool("positive");
     if (hoverPoint) {
       lastPromptKey = null;
       submitPrompts(composePrompts(pinnedPoints, hoverPoint));
     }
   });
   negativeTool.addEventListener("click", () => {
-    setTool(0);
+    setTool("negative");
     if (hoverPoint) {
       lastPromptKey = null;
       submitPrompts(composePrompts(pinnedPoints, hoverPoint));
     }
+  });
+  markerTool.addEventListener("click", () => setTool("marker"));
+  eraserTool.addEventListener("click", () => setTool("eraser"));
+
+  markerSize.addEventListener("input", () => {
+    markerDiameter = Number(markerSize.value);
+    markerSizeValue.value = `${markerDiameter} px`;
+    resizeBrushCursor();
+  });
+  eraserSize.addEventListener("input", () => {
+    eraserDiameter = Number(eraserSize.value);
+    eraserSizeValue.value = `${eraserDiameter} px`;
+    resizeBrushCursor();
+  });
+
+  invertMaskButton.addEventListener("click", () => {
+    if (!maskAvailable) return;
+    editRevision += 1;
+    postWorker({ type: "invert-mask", imageRevision, editRevision });
+  });
+  undoEditButton.addEventListener("click", () => {
+    if (!maskCanUndo) return;
+    editRevision += 1;
+    postWorker({ type: "undo-edit", imageRevision, editRevision });
+  });
+  resetEditsButton.addEventListener("click", () => {
+    if (!maskHasEdits) return;
+    editRevision += 1;
+    postWorker({ type: "reset-edits", imageRevision, editRevision });
   });
 
   undoButton.addEventListener("click", () => {
@@ -711,22 +894,117 @@ if (
   });
 }
 
-function setTool(label: PointLabel): void {
-  activeTool = label;
-  positiveTool.classList.toggle("active", label === 1);
-  positiveTool.setAttribute("aria-pressed", String(label === 1));
-  negativeTool.classList.toggle("active", label === 0);
-  negativeTool.setAttribute("aria-pressed", String(label === 0));
+function setTool(tool: ActiveTool): void {
+  if (isBrushTool(tool) && !maskAvailable) return;
+  activeTool = tool;
+  const controls: Array<[HTMLButtonElement, ActiveTool]> = [
+    [positiveTool, "positive"],
+    [negativeTool, "negative"],
+    [markerTool, "marker"],
+    [eraserTool, "eraser"],
+  ];
+  controls.forEach(([button, value]) => {
+    button.classList.toggle("active", tool === value);
+    button.setAttribute("aria-pressed", String(tool === value));
+  });
   toolHint.textContent =
-    label === 1
+    tool === "positive"
       ? "Positive points include a region."
-      : "Negative points exclude a region.";
+      : tool === "negative"
+        ? "Negative points exclude a region."
+        : tool === "marker"
+          ? "Drag to add visible mask pixels."
+          : "Drag to erase visible mask pixels.";
+  interactionHint.innerHTML = isBrushTool(tool)
+    ? '<span class="cursor-symbol">◯</span> Hold and drag to refine the mask'
+    : '<span class="cursor-symbol">⌖</span> Hover to preview · Click to pin';
+  imageStage.classList.toggle("brush-mode", isBrushTool(tool));
+  brushCursor.classList.toggle("eraser", tool === "eraser");
 
-  if (hoverPoint) {
-    hoverPoint = { ...hoverPoint, label };
+  if (isPointTool(tool) && hoverPoint) {
+    hoverPoint = { ...hoverPoint, label: pointLabel(tool) };
     lastPromptKey = null;
     updateHoverMarker(hoverPoint);
+  } else if (isBrushTool(tool)) {
+    hoverPoint = null;
+    latestPointer = null;
+    removeHoverMarker();
+  } else {
+    hideBrushCursor();
   }
+  updateEditingControls();
+}
+
+function isPointTool(tool: ActiveTool): tool is "positive" | "negative" {
+  return tool === "positive" || tool === "negative";
+}
+
+function isBrushTool(tool: ActiveTool): tool is "marker" | "eraser" {
+  return tool === "marker" || tool === "eraser";
+}
+
+function pointLabel(tool: "positive" | "negative"): PointLabel {
+  return tool === "positive" ? 1 : 0;
+}
+
+function brushOperation(tool: "marker" | "eraser"): BrushOperation {
+  return tool === "marker" ? "add" : "erase";
+}
+
+function activeBrushDiameter(): number {
+  return activeTool === "eraser" ? eraserDiameter : markerDiameter;
+}
+
+function updateBrushCursor(clientX: number, clientY: number): void {
+  if (!isBrushTool(activeTool) || !maskAvailable || !displayImageSize) {
+    hideBrushCursor();
+    return;
+  }
+  const rect = imageStage.getBoundingClientRect();
+  const point = normalizePointer(clientX, clientY, rect);
+  brushCursor.style.left = `${point.x * 100}%`;
+  brushCursor.style.top = `${point.y * 100}%`;
+  resizeBrushCursor();
+  brushCursor.classList.add("visible");
+}
+
+function resizeBrushCursor(): void {
+  if (!displayImageSize || !isBrushTool(activeTool)) return;
+  const rect = imageStage.getBoundingClientRect();
+  const displayDiameter =
+    activeBrushDiameter() * (rect.width / displayImageSize.width);
+  brushCursor.style.width = `${displayDiameter}px`;
+  brushCursor.style.height = `${displayDiameter}px`;
+}
+
+function hideBrushCursor(): void {
+  brushCursor.classList.remove("visible");
+}
+
+function updateEditingControls(): void {
+  if (!maskAvailable && isBrushTool(activeTool)) setTool("positive");
+  markerTool.disabled = !maskAvailable;
+  eraserTool.disabled = !maskAvailable;
+  markerSize.disabled = !maskAvailable;
+  eraserSize.disabled = !maskAvailable;
+  invertMaskButton.disabled = !maskAvailable;
+  undoEditButton.disabled = !maskCanUndo;
+  resetEditsButton.disabled = !maskHasEdits;
+  invertMaskButton.classList.toggle("active", maskInverted);
+  invertMaskButton.setAttribute("aria-pressed", String(maskInverted));
+  clearButton.disabled = pinnedPoints.length === 0 && !maskAvailable;
+}
+
+function resetMaskUiState(): void {
+  activeStroke = null;
+  maskAvailable = false;
+  maskHasEdits = false;
+  maskCanUndo = false;
+  maskInverted = false;
+  editRevision = 0;
+  hideBrushCursor();
+  if (isBrushTool(activeTool)) setTool("positive");
+  updateEditingControls();
 }
 
 function renderDataBrowser(): void {
@@ -932,6 +1210,7 @@ function setStageSize(width: number, height: number): void {
   imageFrame.style.width = `${
     fitted.width + horizontalPadding + horizontalBorder
   }px`;
+  if (brushCursor.classList.contains("visible")) resizeBrushCursor();
 }
 
 function renderMarkers(): void {
@@ -974,7 +1253,7 @@ function applyMarker(marker: HTMLDivElement, point: PointPrompt): void {
 function updatePointControls(): void {
   const count = pinnedPoints.length;
   undoButton.disabled = count === 0;
-  clearButton.disabled = count === 0;
+  clearButton.disabled = count === 0 && !maskAvailable;
   pointCount.textContent = `${count} pinned`;
 }
 
