@@ -1,7 +1,8 @@
 /// <reference lib="webworker" />
 
-import type { MainToWorkerMessage, WorkerToMainMessage } from "./protocol";
+import type { LayerDescriptor, MainToWorkerMessage, WorkerToMainMessage } from "./protocol";
 import { MaskEditor } from "./mask-editor";
+import { compositeMasks } from "./mask-compositor";
 
 type LoadImageMessage = Extract<MainToWorkerMessage, { type: "load-image" }>;
 type DecodeMessage = Extract<MainToWorkerMessage, { type: "decode" }>;
@@ -18,9 +19,21 @@ let desiredImageRevision = -1;
 let pendingImage: LoadImageMessage | undefined;
 let pendingDecode: DecodeMessage | undefined;
 let activePrepare: AbortController | undefined;
-const latestStateRevision = new Map<number, number>();
-const maskEditor = new MaskEditor(100);
+const latestStateRevision = new Map<string, number>();
+const maskLayers = new Map<string, WorkerLayer>();
+let activeLayerId = "";
 let activeStrokeId = -1;
+let activeStrokeLayerId = "";
+const HISTORY_BUDGET = 64 * 1024 * 1024;
+
+interface WorkerLayer {
+  id: string;
+  color: [number, number, number];
+  visible: boolean;
+  editor: MaskEditor;
+  lockedMask?: Uint8Array;
+  previewing?: boolean;
+}
 
 worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
   switch (data.type) {
@@ -34,27 +47,31 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
       desiredImageRevision = data.imageRevision;
       pendingImage = data;
       pendingDecode = undefined;
-      latestStateRevision.set(data.imageRevision, 0);
+      latestStateRevision.clear();
       activePrepare?.abort();
       clearOverlay();
       void pump();
       return;
     case "decode": {
-      const previous = latestStateRevision.get(data.imageRevision) ?? -1;
+      const previous = latestStateRevision.get(data.layerId) ?? -1;
       if (data.stateRevision < previous) return;
-      latestStateRevision.set(data.imageRevision, data.stateRevision);
+      latestStateRevision.set(data.layerId, data.stateRevision);
       pendingDecode = data;
       void pump();
       return;
     }
     case "clear": {
-      const previous = latestStateRevision.get(data.imageRevision) ?? -1;
+      const previous = latestStateRevision.get(data.layerId) ?? -1;
       if (data.stateRevision < previous) return;
-      latestStateRevision.set(data.imageRevision, data.stateRevision);
-      if (pendingDecode?.imageRevision === data.imageRevision) pendingDecode = undefined;
-      clearOverlay();
-      post({ type: "overlay-cleared", imageRevision: data.imageRevision, stateRevision: data.stateRevision });
-      postEditState(data.imageRevision, 0);
+      latestStateRevision.set(data.layerId, data.stateRevision);
+      if (pendingDecode?.layerId === data.layerId) pendingDecode = undefined;
+      const layer = getLayer(data.layerId);
+      layer.editor.clearMask();
+      layer.lockedMask = undefined;
+      layer.previewing = false;
+      renderMasks();
+      post({ type: "overlay-cleared", imageRevision: data.imageRevision, layerId: data.layerId, stateRevision: data.stateRevision });
+      postEditState(data.imageRevision, data.layerId, 0);
       return;
     }
     case "brush": {
@@ -63,19 +80,23 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
         if (data.phase === "begin") {
           const first = data.points[0];
           if (!first) return;
+          commitPreview(getLayer(data.layerId));
           activeStrokeId = data.strokeId;
-          maskEditor.beginStroke(data.operation, data.radius, first);
-          maskEditor.extendStroke(data.points.slice(1));
-        } else if (data.strokeId === activeStrokeId) {
+          activeStrokeLayerId = data.layerId;
+          getLayer(data.layerId).editor.beginStroke(data.operation, data.radius, first);
+          getLayer(data.layerId).editor.extendStroke(data.points.slice(1));
+        } else if (data.strokeId === activeStrokeId && data.layerId === activeStrokeLayerId) {
           if (data.phase === "continue") {
-            maskEditor.extendStroke(data.points);
+            getLayer(data.layerId).editor.extendStroke(data.points);
           } else {
-            maskEditor.endStroke(data.points);
+            getLayer(data.layerId).editor.endStroke(data.points);
             activeStrokeId = -1;
-            postEditState(data.imageRevision, data.editRevision);
+            activeStrokeLayerId = "";
+            enforceHistoryBudget();
+            postEditState(data.imageRevision, data.layerId, data.editRevision);
           }
         }
-        renderMask();
+        renderMasks();
       } catch (error) {
         postError("edit", error, data.imageRevision);
       }
@@ -86,14 +107,66 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
     case "reset-edits": {
       if (data.imageRevision !== activeImageRevision || data.imageRevision !== desiredImageRevision) return;
       try {
-        if (data.type === "invert-mask") maskEditor.toggleInvert();
-        if (data.type === "undo-edit") maskEditor.undo();
-        if (data.type === "reset-edits") maskEditor.resetEdits();
-        renderMask();
-        postEditState(data.imageRevision, data.editRevision);
+        const editor = getLayer(data.layerId).editor;
+        if (data.type === "invert-mask") commitPreview(getLayer(data.layerId));
+        if (data.type === "invert-mask") editor.toggleInvert();
+        if (data.type === "undo-edit") editor.undo();
+        if (data.type === "reset-edits") editor.resetEdits();
+        enforceHistoryBudget();
+        renderMasks();
+        postEditState(data.imageRevision, data.layerId, data.editRevision);
       } catch (error) {
         postError("edit", error, data.imageRevision);
       }
+      return;
+    }
+    case "create-layer": {
+      if (data.imageRevision !== activeImageRevision || !canvas) return;
+      createWorkerLayer(data.layer, canvas.width, canvas.height);
+      renderMasks();
+      postEditState(data.imageRevision, data.layer.id, 0);
+      return;
+    }
+    case "update-layer": {
+      if (data.imageRevision !== activeImageRevision) return;
+      const layer = getLayer(data.layerId);
+      if (data.color !== undefined) layer.color = parseColor(data.color);
+      if (data.visible !== undefined) {
+        layer.visible = data.visible;
+        if (!data.visible && layer.id === activeLayerId) restoreLockedMask(layer);
+      }
+      renderMasks();
+      return;
+    }
+    case "activate-layer": {
+      if (data.imageRevision !== activeImageRevision) return;
+      const previous = maskLayers.get(activeLayerId);
+      if (previous) restoreLockedMask(previous);
+      const next = getLayer(data.layerId);
+      activeLayerId = data.layerId;
+      restoreLockedMask(next);
+      activeStrokeId = -1;
+      activeStrokeLayerId = "";
+      renderMasks();
+      postEditState(data.imageRevision, data.layerId, 0);
+      return;
+    }
+    case "delete-layer": {
+      if (data.imageRevision !== activeImageRevision) return;
+      maskLayers.delete(data.layerId);
+      latestStateRevision.delete(data.layerId);
+      if (activeLayerId === data.layerId) activeLayerId = maskLayers.keys().next().value ?? "";
+      renderMasks();
+      return;
+    }
+    case "cancel-preview": {
+      if (data.imageRevision !== activeImageRevision) return;
+      const previous = latestStateRevision.get(data.layerId) ?? -1;
+      if (data.stateRevision < previous) return;
+      latestStateRevision.set(data.layerId, data.stateRevision);
+      if (pendingDecode?.layerId === data.layerId && pendingDecode.preview) pendingDecode = undefined;
+      restoreLockedMask(getLayer(data.layerId));
+      renderMasks();
       return;
     }
   }
@@ -162,7 +235,7 @@ async function loadImage(message: LoadImageMessage): Promise<void> {
     if (message.imageRevision !== desiredImageRevision) return;
     activeImageId = message.imageId;
     activeImageRevision = message.imageRevision;
-    prepareOverlay(result.width, result.height);
+    prepareOverlay(result.width, result.height, message.layers, message.activeLayerId);
     post({
       type: "image-ready",
       imageRevision: message.imageRevision,
@@ -199,51 +272,130 @@ async function decode(message: DecodeMessage): Promise<void> {
     const height = headerNumber(response, "X-Mask-Height");
     const serverDecodeMs = headerNumber(response, "X-Decode-Ms");
     const mask = new Uint8Array(await response.arrayBuffer());
-    const current = imageRevision === activeImageRevision && imageRevision === desiredImageRevision && stateRevision === latestStateRevision.get(imageRevision);
-    if (current) drawMask(mask, width, height);
-    post({ type: "mask-ready", imageRevision, stateRevision, decodeMs: performance.now() - started, serverDecodeMs, applied: current });
+    const current =
+      imageRevision === activeImageRevision &&
+      imageRevision === desiredImageRevision &&
+      stateRevision === latestStateRevision.get(message.layerId) &&
+      maskLayers.has(message.layerId) &&
+      (!message.preview || (activeLayerId === message.layerId && getLayer(message.layerId).visible));
+    if (current) drawMask(mask, width, height, message.layerId, message.preview);
+    post({
+      type: "mask-ready", imageRevision, layerId: message.layerId, stateRevision,
+      decodeMs: performance.now() - started, serverDecodeMs, applied: current,
+    });
   } catch (error) {
     postError("decode", error, message.imageRevision, message.stateRevision);
   }
 }
 
-function prepareOverlay(width: number, height: number): void {
+function prepareOverlay(width: number, height: number, layers: LayerDescriptor[], nextActiveLayerId: string): void {
   if (!canvas || !context) throw new Error("Overlay canvas is unavailable.");
   canvas.width = width;
   canvas.height = height;
-  maskEditor.resetImage(width, height);
+  maskLayers.clear();
+  latestStateRevision.clear();
+  layers.forEach((layer) => createWorkerLayer(layer, width, height));
+  if (!maskLayers.has(nextActiveLayerId)) throw new Error("The active mask layer is missing.");
+  activeLayerId = nextActiveLayerId;
   activeStrokeId = -1;
+  activeStrokeLayerId = "";
   pixels = context.createImageData(width, height);
-  for (let index = 0; index < width * height; index += 1) {
-    pixels.data[index * 4] = 64;
-    pixels.data[index * 4 + 1] = 148;
-    pixels.data[index * 4 + 2] = 220;
-  }
+  renderMasks();
 }
 
-function drawMask(mask: Uint8Array, width: number, height: number): void {
+function drawMask(mask: Uint8Array, width: number, height: number, layerId: string, preview: boolean): void {
   if (!canvas || !context || !pixels || canvas.width !== width || canvas.height !== height) return;
   const count = width * height;
   if (mask.byteLength !== Math.ceil(count / 8)) throw new Error("The H100 service returned an invalid mask size.");
-  maskEditor.setBaseMask(mask);
-  renderMask();
-  postEditState(activeImageRevision, 0);
+  const layer = getLayer(layerId);
+  layer.editor.setBaseMask(mask);
+  layer.previewing = preview;
+  if (!preview) layer.lockedMask = mask.slice();
+  renderMasks();
+  postEditState(activeImageRevision, layerId, 0);
 }
 
-function renderMask(): void {
-  if (!context || !pixels) return;
-  maskEditor.writeAlpha(pixels.data, 126);
+function renderMasks(): void {
+  if (!context || !pixels || !canvas) return;
+  const layers = [];
+  for (const layer of maskLayers.values()) {
+    if (layer.visible && layer.id !== activeLayerId) {
+      layers.push({ mask: layer.editor.displayedMask(), color: layer.color, alpha: 0.34 });
+    }
+  }
+  const active = maskLayers.get(activeLayerId);
+  if (active?.visible) layers.push({ mask: active.editor.displayedMask(), color: active.color, alpha: 0.5 });
+  compositeMasks(pixels.data, canvas.width * canvas.height, layers);
   context.putImageData(pixels, 0, 0);
 }
 
 function clearOverlay(): void {
-  maskEditor.clearMask();
+  maskLayers.clear();
+  latestStateRevision.clear();
+  activeLayerId = "";
   activeStrokeId = -1;
+  activeStrokeLayerId = "";
+  pixels = undefined;
   if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
 }
 
-function postEditState(imageRevision: number, editRevision: number): void {
-  post({ type: "edit-state", imageRevision, editRevision, ...maskEditor.state() });
+function createWorkerLayer(layer: LayerDescriptor, width: number, height: number): void {
+  if (maskLayers.has(layer.id)) throw new Error("A mask layer with this ID already exists.");
+  const editor = new MaskEditor(100);
+  editor.resetImage(width, height);
+  maskLayers.set(layer.id, { id: layer.id, color: parseColor(layer.color), visible: layer.visible, editor });
+  latestStateRevision.set(layer.id, 0);
+}
+
+function getLayer(layerId: string): WorkerLayer {
+  const layer = maskLayers.get(layerId);
+  if (!layer) throw new Error("Unknown mask layer.");
+  return layer;
+}
+
+function restoreLockedMask(layer: WorkerLayer): void {
+  if (layer.lockedMask) layer.editor.setBaseMask(layer.lockedMask);
+  else layer.editor.clearBaseMask();
+  layer.previewing = false;
+}
+
+function commitPreview(layer: WorkerLayer): void {
+  if (!layer.previewing) return;
+  layer.lockedMask = layer.editor.baseMask();
+  layer.previewing = false;
+}
+
+function parseColor(color: string): [number, number, number] {
+  if (!/^#[0-9a-f]{6}$/i.test(color)) throw new Error("Invalid mask layer color.");
+  return [
+    Number.parseInt(color.slice(1, 3), 16),
+    Number.parseInt(color.slice(3, 5), 16),
+    Number.parseInt(color.slice(5, 7), 16),
+  ];
+}
+
+function enforceHistoryBudget(): void {
+  let total = 0;
+  for (const layer of maskLayers.values()) total += layer.editor.historyBytes();
+  while (total > HISTORY_BUDGET) {
+    let oldest: WorkerLayer | undefined;
+    let oldestSerial = Number.POSITIVE_INFINITY;
+    for (const layer of maskLayers.values()) {
+      const serial = layer.editor.oldestHistorySerial();
+      if (serial !== undefined && serial < oldestSerial) {
+        oldest = layer;
+        oldestSerial = serial;
+      }
+    }
+    if (!oldest) break;
+    const before = oldest.editor.historyBytes();
+    oldest.editor.discardOldestHistory();
+    total -= before - oldest.editor.historyBytes();
+  }
+}
+
+function postEditState(imageRevision: number, layerId: string, editRevision: number): void {
+  post({ type: "edit-state", imageRevision, layerId, editRevision, ...getLayer(layerId).editor.state() });
 }
 
 function headerNumber(response: Response, name: string): number {

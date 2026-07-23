@@ -284,6 +284,201 @@ button:focus-visible {
   display: none;
 }
 
+.mask-picker {
+  position: relative;
+}
+
+.mask-picker-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 7px;
+}
+
+.mask-picker-trigger,
+.add-mask-button {
+  height: 40px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid rgba(29, 36, 32, 0.13);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.mask-picker-trigger {
+  min-width: 0;
+  padding: 0 10px;
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+}
+
+.active-layer-name {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.active-layer-name.hidden-mask {
+  opacity: 0.48;
+  text-decoration: line-through;
+}
+
+.mask-count {
+  color: #7d8780;
+  font-size: 9px;
+}
+
+.layer-swatch {
+  width: 11px;
+  height: 11px;
+  display: inline-block;
+  border: 1px solid rgba(29, 36, 32, 0.16);
+  border-radius: 50%;
+}
+
+.add-mask-button {
+  padding: 0;
+  color: var(--green-deep);
+  font-size: 20px;
+}
+
+.add-mask-button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.mask-picker-menu {
+  position: absolute;
+  z-index: 24;
+  top: calc(100% + 5px);
+  right: 0;
+  left: 0;
+  padding: 6px;
+  background: #fbfcf8;
+  border: 1px solid rgba(29, 36, 32, 0.16);
+  border-radius: 5px;
+  box-shadow: 0 16px 36px rgba(35, 47, 39, 0.18);
+}
+
+.mask-picker-menu[hidden] {
+  display: none;
+}
+
+.mask-layer-list {
+  max-height: min(260px, 38vh);
+  overflow-y: auto;
+}
+
+.mask-layer-row {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  border-radius: 3px;
+}
+
+.mask-layer-row:hover,
+.mask-layer-row.active {
+  background: #eef2ec;
+}
+
+.mask-layer-row.active {
+  box-shadow: inset 2px 0 var(--green);
+}
+
+.layer-visibility,
+.layer-select {
+  height: 32px;
+  padding: 0;
+  color: #5f6b63;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.layer-visibility {
+  font-size: 11px;
+}
+
+.layer-visibility[aria-pressed="false"] {
+  opacity: 0.42;
+}
+
+.layer-select {
+  min-width: 0;
+  padding-right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  text-align: left;
+}
+
+.layer-select span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mask-layer-editor {
+  margin-top: 6px;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 42px;
+  align-items: center;
+  gap: 6px;
+  border-top: 1px solid rgba(29, 36, 32, 0.09);
+}
+
+.mask-layer-editor label {
+  color: #7c867f;
+  font-size: 8px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.mask-layer-editor input[type="text"],
+.mask-layer-editor input:not([type]) {
+  min-width: 0;
+}
+
+#mask-layer-name {
+  height: 30px;
+  padding: 0 7px;
+  border: 1px solid rgba(29, 36, 32, 0.14);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 10px;
+}
+
+#mask-layer-color {
+  width: 34px;
+  height: 30px;
+  padding: 2px;
+  border: 1px solid rgba(29, 36, 32, 0.14);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.delete-mask-button {
+  grid-column: 2 / 4;
+  justify-self: end;
+  padding: 4px 0;
+  color: var(--red);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.delete-mask-button:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
 .tree-row {
   min-height: 32px;
   display: flex;
@@ -699,6 +894,10 @@ button:focus-visible {
 
 .image-stage.brush-mode {
   cursor: none;
+}
+
+.image-stage.active-layer-hidden {
+  cursor: default;
 }
 
 .image-stage img {

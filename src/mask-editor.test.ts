@@ -104,6 +104,7 @@ describe("MaskEditor", () => {
     expect(editor.undo()).toBe(true);
     expect(editor.undo()).toBe(true);
     expect(editor.undo()).toBe(false);
+    expect(editor.historyBytes()).toBe(0);
     editor.clearMask();
     expect(editor.state()).toEqual({
       hasMask: false,
@@ -111,5 +112,17 @@ describe("MaskEditor", () => {
       canUndo: false,
       inverted: false,
     });
+  });
+
+  it("reports and can evict its oldest history entry", () => {
+    const editor = new MaskEditor();
+    editor.resetImage(8, 8);
+    editor.setBaseMask(packed(8, 8, [0]));
+    editor.toggleInvert();
+    const first = editor.oldestHistorySerial();
+    editor.toggleInvert();
+    expect(editor.historyBytes()).toBeGreaterThan(0);
+    expect(editor.discardOldestHistory()).toBe(true);
+    expect(editor.oldestHistorySerial()).toBeGreaterThan(first!);
   });
 });

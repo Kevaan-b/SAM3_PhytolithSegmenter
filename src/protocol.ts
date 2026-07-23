@@ -14,6 +14,12 @@ export interface MaskPoint {
   y: number;
 }
 
+export interface LayerDescriptor {
+  id: string;
+  color: string;
+  visible: boolean;
+}
+
 export type MainToWorkerMessage =
   | {
       type: "initialize";
@@ -24,21 +30,27 @@ export type MainToWorkerMessage =
       imageRevision: number;
       imageId: string;
       url: string;
+      layers: LayerDescriptor[];
+      activeLayerId: string;
     }
   | {
       type: "decode";
       imageRevision: number;
+      layerId: string;
       stateRevision: number;
       points: PointPrompt[];
+      preview: boolean;
     }
   | {
       type: "clear";
       imageRevision: number;
+      layerId: string;
       stateRevision: number;
     }
   | {
       type: "brush";
       imageRevision: number;
+      layerId: string;
       editRevision: number;
       strokeId: number;
       phase: BrushPhase;
@@ -49,7 +61,31 @@ export type MainToWorkerMessage =
   | {
       type: "invert-mask" | "undo-edit" | "reset-edits";
       imageRevision: number;
+      layerId: string;
       editRevision: number;
+    }
+  | {
+      type: "create-layer";
+      imageRevision: number;
+      layer: LayerDescriptor;
+    }
+  | {
+      type: "update-layer";
+      imageRevision: number;
+      layerId: string;
+      color?: string;
+      visible?: boolean;
+    }
+  | {
+      type: "activate-layer" | "delete-layer";
+      imageRevision: number;
+      layerId: string;
+    }
+  | {
+      type: "cancel-preview";
+      imageRevision: number;
+      layerId: string;
+      stateRevision: number;
     };
 
 export type WorkerToMainMessage =
@@ -73,6 +109,7 @@ export type WorkerToMainMessage =
   | {
       type: "mask-ready";
       imageRevision: number;
+      layerId: string;
       stateRevision: number;
       decodeMs: number;
       serverDecodeMs: number;
@@ -81,6 +118,7 @@ export type WorkerToMainMessage =
   | {
       type: "overlay-cleared";
       imageRevision: number;
+      layerId: string;
       stateRevision: number;
     }
   | {
@@ -103,6 +141,7 @@ export type WorkerToMainMessage =
   | {
       type: "edit-state";
       imageRevision: number;
+      layerId: string;
       editRevision: number;
       hasMask: boolean;
       hasEdits: boolean;

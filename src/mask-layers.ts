@@ -1,0 +1,114 @@
+import type { PointPrompt } from "./protocol";
+
+export const MASK_PALETTE = [
+  "#4094dc", "#e06b65", "#34a66f", "#9b72cf",
+  "#e29a3b", "#26a6a1", "#d767a7", "#7f8f3f",
+] as const;
+
+export interface LayerEditState {
+  hasMask: boolean;
+  hasEdits: boolean;
+  canUndo: boolean;
+  inverted: boolean;
+}
+
+export interface MaskLayer {
+  id: string;
+  name: string;
+  color: string;
+  visible: boolean;
+  pinnedPoints: PointPrompt[];
+  stateRevision: number;
+  editRevision: number;
+  lastPromptKey: string | null;
+  editState: LayerEditState;
+}
+
+export class MaskLayerCollection {
+  private layers: MaskLayer[] = [];
+  private activeId = "";
+  private nextNumber = 1;
+
+  constructor(private readonly makeId: () => string = defaultId) {
+    this.reset();
+  }
+
+  reset(): MaskLayer {
+    this.layers = [];
+    this.activeId = "";
+    this.nextNumber = 1;
+    return this.add();
+  }
+
+  add(): MaskLayer {
+    const number = this.nextNumber++;
+    const layer = createLayer(
+      this.makeId(),
+      `Mask ${number}`,
+      MASK_PALETTE[(number - 1) % MASK_PALETTE.length]!,
+    );
+    this.layers.push(layer);
+    this.activeId = layer.id;
+    return layer;
+  }
+
+  all(): readonly MaskLayer[] { return this.layers; }
+
+  active(): MaskLayer {
+    const layer = this.layers.find(({ id }) => id === this.activeId);
+    if (!layer) throw new Error("The active mask layer is missing.");
+    return layer;
+  }
+
+  get(id: string): MaskLayer | undefined { return this.layers.find((layer) => layer.id === id); }
+
+  select(id: string): MaskLayer {
+    const layer = this.require(id);
+    this.activeId = id;
+    return layer;
+  }
+
+  delete(id: string): MaskLayer {
+    if (this.layers.length === 1) throw new Error("At least one mask layer is required.");
+    const index = this.layers.findIndex((layer) => layer.id === id);
+    if (index < 0) throw new Error("Unknown mask layer.");
+    const wasActive = id === this.activeId;
+    this.layers.splice(index, 1);
+    if (wasActive) this.activeId = this.layers[Math.min(index, this.layers.length - 1)]!.id;
+    return this.active();
+  }
+
+  rename(id: string, name: string): void {
+    const normalized = name.trim().slice(0, 80);
+    if (!normalized) throw new Error("Mask layer names cannot be empty.");
+    this.require(id).name = normalized;
+  }
+
+  setColor(id: string, color: string): void {
+    if (!/^#[0-9a-f]{6}$/i.test(color)) throw new Error("Mask colors must use #RRGGBB format.");
+    this.require(id).color = color.toLowerCase();
+  }
+
+  setVisible(id: string, visible: boolean): void {
+    this.require(id).visible = visible;
+  }
+
+  private require(id: string): MaskLayer {
+    const layer = this.layers.find((item) => item.id === id);
+    if (!layer) throw new Error("Unknown mask layer.");
+    return layer;
+  }
+}
+
+function createLayer(id: string, name: string, color: string): MaskLayer {
+  return {
+    id, name, color, visible: true, pinnedPoints: [], stateRevision: 0, editRevision: 0,
+    lastPromptKey: null,
+    editState: { hasMask: false, hasEdits: false, canUndo: false, inverted: false },
+  };
+}
+
+let fallbackId = 0;
+function defaultId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `mask-${++fallbackId}`;
+}

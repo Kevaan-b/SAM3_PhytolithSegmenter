@@ -27,6 +27,7 @@ import type {
   PointPrompt,
   WorkerToMainMessage,
 } from "./protocol";
+import { MaskLayerCollection, type MaskLayer } from "./mask-layers";
 
 type ActiveTool = "positive" | "negative" | "marker" | "eraser";
 
@@ -106,9 +107,37 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           </div>
         </section>
 
-        <section class="control-section">
+        <section class="control-section masks-section">
           <div class="section-heading">
             <span>02</span>
+            <h2>Masks</h2>
+          </div>
+          <div class="mask-picker" id="mask-picker">
+            <div class="mask-picker-toolbar">
+              <button class="mask-picker-trigger" id="mask-picker-trigger" type="button" aria-expanded="false" aria-haspopup="dialog">
+                <span class="layer-swatch" id="active-layer-swatch"></span>
+                <span class="active-layer-name" id="active-layer-name">Mask 1</span>
+                <span class="mask-count" id="mask-count">1 mask</span>
+                <span aria-hidden="true">⌄</span>
+              </button>
+              <button class="add-mask-button" id="add-mask" type="button" aria-label="Add mask layer">+</button>
+            </div>
+            <div class="mask-picker-menu" id="mask-picker-menu" hidden>
+              <div class="mask-layer-list" id="mask-layer-list" role="listbox" aria-label="Mask layers"></div>
+              <div class="mask-layer-editor">
+                <label for="mask-layer-name">Name</label>
+                <input id="mask-layer-name" maxlength="80" />
+                <label for="mask-layer-color">Color</label>
+                <input id="mask-layer-color" type="color" />
+                <button class="delete-mask-button" id="delete-mask" type="button">Delete mask</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="control-section">
+          <div class="section-heading">
+            <span>03</span>
             <h2>Set point type</h2>
           </div>
           <div class="tool-switch" role="group" aria-label="Point type">
@@ -138,7 +167,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
 
         <section class="control-section mask-edit-section">
           <div class="section-heading">
-            <span>03</span>
+            <span>04</span>
             <h2>Refine mask</h2>
           </div>
           <div class="tool-switch" role="group" aria-label="Mask brush">
@@ -233,6 +262,17 @@ const imageStage = getElement<HTMLDivElement>("image-stage");
 const sourceImage = getElement<HTMLImageElement>("source-image");
 const overlay = getElement<HTMLCanvasElement>("mask-overlay");
 const markerLayer = getElement<HTMLDivElement>("marker-layer");
+const maskPicker = getElement<HTMLDivElement>("mask-picker");
+const maskPickerTrigger = getElement<HTMLButtonElement>("mask-picker-trigger");
+const maskPickerMenu = getElement<HTMLDivElement>("mask-picker-menu");
+const maskLayerList = getElement<HTMLDivElement>("mask-layer-list");
+const activeLayerSwatch = getElement<HTMLSpanElement>("active-layer-swatch");
+const activeLayerName = getElement<HTMLSpanElement>("active-layer-name");
+const maskCount = getElement<HTMLSpanElement>("mask-count");
+const addMaskButton = getElement<HTMLButtonElement>("add-mask");
+const maskLayerName = getElement<HTMLInputElement>("mask-layer-name");
+const maskLayerColor = getElement<HTMLInputElement>("mask-layer-color");
+const deleteMaskButton = getElement<HTMLButtonElement>("delete-mask");
 const positiveTool = getElement<HTMLButtonElement>("positive-tool");
 const negativeTool = getElement<HTMLButtonElement>("negative-tool");
 const markerTool = getElement<HTMLButtonElement>("marker-tool");
@@ -268,28 +308,22 @@ const expandedFolderPaths = new Set<string>([""]);
 let activeTool: ActiveTool = "positive";
 let markerDiameter = 20;
 let eraserDiameter = 32;
-let maskAvailable = false;
-let maskHasEdits = false;
-let maskCanUndo = false;
-let maskInverted = false;
-let editRevision = 0;
+const maskLayers = new MaskLayerCollection();
 let nextStrokeId = 0;
 let activeStroke: {
   pointerId: number;
   strokeId: number;
+  layerId: string;
   operation: BrushOperation;
   radius: number;
 } | null = null;
-let pinnedPoints: PointPrompt[] = [];
 let hoverPoint: PointPrompt | null = null;
 let pointerInside = false;
 let modelReady = false;
 let imageReady = false;
 let imageRevision = 0;
-let stateRevision = 0;
 let animationFrame = 0;
 let latestPointer: { clientX: number; clientY: number } | null = null;
-let lastPromptKey: string | null = null;
 let displayImageSize: { width: number; height: number } | null = null;
 
 sourceImage.addEventListener("load", () => {
@@ -303,6 +337,7 @@ window.addEventListener("resize", () => {
   }
 });
 renderDataBrowser();
+renderMaskPicker();
 updatePointControls();
 updateEditingControls();
 
@@ -385,6 +420,7 @@ if (
         if (message.imageRevision !== imageRevision) return;
         setStageSize(message.width, message.height);
         imageReady = true;
+        renderMaskPicker();
         imageStage.classList.remove("disabled");
         stageMessage.classList.add("hidden");
         encodeMetric.textContent = message.cacheHit
@@ -411,10 +447,15 @@ if (
 
       case "edit-state": {
         if (message.imageRevision !== imageRevision) return;
-        maskAvailable = message.hasMask;
-        maskHasEdits = message.hasEdits;
-        maskCanUndo = message.canUndo;
-        maskInverted = message.inverted;
+        const layer = maskLayers.get(message.layerId);
+        if (!layer) return;
+        layer.editState = {
+          hasMask: message.hasMask,
+          hasEdits: message.hasEdits,
+          canUndo: message.canUndo,
+          inverted: message.inverted,
+        };
+        if (layer.id !== maskLayers.active().id) return;
         updateEditingControls();
         return;
       }
@@ -434,6 +475,7 @@ if (
   function loadActiveImage(): void {
     if (!modelReady || !activeImage) return;
     imageReady = false;
+    renderMaskPicker();
     imageStage.classList.add("disabled");
     setStatus("loading", "Encoding image…");
     showStageMessage(
@@ -445,21 +487,25 @@ if (
       imageRevision,
       imageId: activeImage.id,
       url: activeImage.url,
+      layers: maskLayers.all().map(({ id, color, visible }) => ({ id, color, visible })),
+      activeLayerId: maskLayers.active().id,
     });
   }
 
-  function submitPrompts(points: PointPrompt[]): void {
-    if (!imageReady) return;
+  function submitPrompts(points: PointPrompt[], preview = false): void {
+    const layer = maskLayers.active();
+    if (!imageReady || !layer.visible) return;
     const key = promptKey(points);
-    if (key === lastPromptKey) return;
-    lastPromptKey = key;
-    stateRevision += 1;
+    if (key === layer.lastPromptKey) return;
+    layer.lastPromptKey = key;
+    layer.stateRevision += 1;
 
     if (points.length === 0) {
       postWorker({
         type: "clear",
         imageRevision,
-        stateRevision,
+        layerId: layer.id,
+        stateRevision: layer.stateRevision,
       });
       return;
     }
@@ -467,13 +513,15 @@ if (
     postWorker({
       type: "decode",
       imageRevision,
-      stateRevision,
+      layerId: layer.id,
+      stateRevision: layer.stateRevision,
       points,
+      preview,
     });
   }
 
   imageStage.addEventListener("pointerenter", (event) => {
-    if (!imageReady) return;
+    if (!imageReady || !maskLayers.active().visible) return;
     pointerInside = true;
     if (isBrushTool(activeTool)) {
       updateBrushCursor(event.clientX, event.clientY);
@@ -483,7 +531,7 @@ if (
   });
 
   imageStage.addEventListener("pointermove", (event) => {
-    if (!imageReady) return;
+    if (!imageReady || !maskLayers.active().visible) return;
     pointerInside = true;
     if (isBrushTool(activeTool)) {
       updateBrushCursor(event.clientX, event.clientY);
@@ -502,24 +550,28 @@ if (
     removeHoverMarker();
     hideBrushCursor();
     if (isBrushTool(activeTool)) return;
-    lastPromptKey = null;
-    submitPrompts(pinnedPoints);
+    const layer = maskLayers.active();
+    layer.lastPromptKey = null;
+    submitPrompts(layer.pinnedPoints);
   });
 
   imageStage.addEventListener("pointerdown", (event) => {
     if (
       !imageReady ||
-      !maskAvailable ||
+      !maskLayers.active().editState.hasMask ||
+      !maskLayers.active().visible ||
       !isBrushTool(activeTool) ||
       event.button !== 0
     ) return;
     event.preventDefault();
     imageStage.setPointerCapture?.(event.pointerId);
-    editRevision += 1;
+    const layer = maskLayers.active();
+    layer.editRevision += 1;
     const strokeId = ++nextStrokeId;
     activeStroke = {
       pointerId: event.pointerId,
       strokeId,
+      layerId: layer.id,
       operation: brushOperation(activeTool),
       radius: activeBrushDiameter() / 2,
     };
@@ -530,19 +582,20 @@ if (
   imageStage.addEventListener("pointercancel", finishBrushStroke);
 
   imageStage.addEventListener("click", (event) => {
-    if (!imageReady || !pointerInside || !isPointTool(activeTool)) return;
+    if (!imageReady || !maskLayers.active().visible || !pointerInside || !isPointTool(activeTool)) return;
     const normalized = normalizePointer(
       event.clientX,
       event.clientY,
       imageStage.getBoundingClientRect(),
     );
-    pinnedPoints.push({ ...normalized, label: pointLabel(activeTool) });
+    const layer = maskLayers.active();
+    layer.pinnedPoints.push({ ...normalized, label: pointLabel(activeTool) });
     hoverPoint = null;
     latestPointer = null;
-    lastPromptKey = null;
+    layer.lastPromptKey = null;
     renderMarkers();
     updatePointControls();
-    submitPrompts(pinnedPoints);
+    submitPrompts(layer.pinnedPoints);
   });
 
   function queuePointer(clientX: number, clientY: number): void {
@@ -555,7 +608,8 @@ if (
         !latestPointer ||
         !pointerInside ||
         !imageReady ||
-        !isPointTool(activeTool)
+        !isPointTool(activeTool) ||
+        !maskLayers.active().visible
       ) return;
       const normalized = normalizePointer(
         latestPointer.clientX,
@@ -564,7 +618,7 @@ if (
       );
       hoverPoint = { ...normalized, label: pointLabel(activeTool) };
       updateHoverMarker(hoverPoint);
-      submitPrompts([...pinnedPoints, hoverPoint]);
+      submitPrompts([...maskLayers.active().pinnedPoints, hoverPoint], true);
     });
   }
 
@@ -584,7 +638,8 @@ if (
     postWorker({
       type: "brush",
       imageRevision,
-      editRevision,
+      layerId: activeStroke.layerId,
+      editRevision: maskLayers.get(activeStroke.layerId)?.editRevision ?? 0,
       strokeId,
       phase,
       operation: activeStroke.operation,
@@ -686,13 +741,11 @@ if (
 
     activeImage = image;
     imageRevision += 1;
-    stateRevision = 0;
+    imageReady = false;
     resetMaskUiState();
-    pinnedPoints = clearPoints();
     hoverPoint = null;
     pointerInside = false;
     latestPointer = null;
-    lastPromptKey = null;
     encodeMetric.textContent = "—";
     decodeMetric.textContent = "—";
     setDataImage(image);
@@ -705,14 +758,11 @@ if (
   function clearActiveImage(): void {
     activeImage = null;
     imageRevision += 1;
-    stateRevision = 0;
     resetMaskUiState();
     imageReady = false;
-    pinnedPoints = clearPoints();
     hoverPoint = null;
     pointerInside = false;
     latestPointer = null;
-    lastPromptKey = null;
     displayImageSize = null;
     sourceImage.removeAttribute("src");
     sourceImage.alt = "No image selected";
@@ -729,7 +779,8 @@ if (
     postWorker({
       type: "clear",
       imageRevision,
-      stateRevision,
+      layerId: maskLayers.active().id,
+      stateRevision: maskLayers.active().stateRevision,
     });
     showNotice(
       "No images in this folder",
@@ -820,11 +871,95 @@ if (
     ) {
       setFolderTreeOpen(false);
     }
+    if (!maskPickerMenu.hidden && !maskPicker.contains(event.target as Node)) {
+      setMaskPickerOpen(false);
+    }
   });
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") setFolderTreeOpen(false);
+    if (event.key === "Escape") {
+      setFolderTreeOpen(false);
+      setMaskPickerOpen(false);
+    }
   });
+
+  maskPickerTrigger.addEventListener("click", () => setMaskPickerOpen(maskPickerMenu.hidden));
+  addMaskButton.addEventListener("click", () => {
+    if (!imageReady) return;
+    cancelTransientInteraction();
+    const layer = maskLayers.add();
+    postWorker({ type: "create-layer", imageRevision, layer: descriptor(layer) });
+    postWorker({ type: "activate-layer", imageRevision, layerId: layer.id });
+    refreshActiveLayerUi();
+    setMaskPickerOpen(true);
+  });
+  maskLayerList.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement;
+    const visibility = target.closest<HTMLButtonElement>("[data-layer-visible]");
+    if (visibility) {
+      const id = visibility.dataset.layerVisible!;
+      const layer = maskLayers.get(id);
+      if (!layer) return;
+      const visible = !layer.visible;
+      maskLayers.setVisible(id, visible);
+      if (id === maskLayers.active().id && !visible) cancelTransientInteraction();
+      postWorker({ type: "update-layer", imageRevision, layerId: id, visible });
+      refreshActiveLayerUi();
+      return;
+    }
+    const row = target.closest<HTMLButtonElement>("[data-layer-select]");
+    if (!row) return;
+    cancelTransientInteraction();
+    const layer = maskLayers.select(row.dataset.layerSelect!);
+    postWorker({ type: "activate-layer", imageRevision, layerId: layer.id });
+    refreshActiveLayerUi();
+  });
+  maskLayerName.addEventListener("change", () => {
+    try { maskLayers.rename(maskLayers.active().id, maskLayerName.value); } catch { /* Restore below. */ }
+    renderMaskPicker();
+  });
+  maskLayerColor.addEventListener("input", () => {
+    const layer = maskLayers.active();
+    maskLayers.setColor(layer.id, maskLayerColor.value);
+    postWorker({ type: "update-layer", imageRevision, layerId: layer.id, color: layer.color });
+    renderMaskPicker();
+  });
+  deleteMaskButton.addEventListener("click", () => {
+    if (maskLayers.all().length === 1) return;
+    cancelTransientInteraction();
+    const deletedId = maskLayers.active().id;
+    const active = maskLayers.delete(deletedId);
+    postWorker({ type: "delete-layer", imageRevision, layerId: deletedId });
+    postWorker({ type: "activate-layer", imageRevision, layerId: active.id });
+    refreshActiveLayerUi();
+  });
+
+  function cancelTransientInteraction(): void {
+    const layer = maskLayers.active();
+    if (hoverPoint || latestPointer) {
+      layer.stateRevision += 1;
+      layer.lastPromptKey = null;
+      postWorker({
+        type: "cancel-preview",
+        imageRevision,
+        layerId: layer.id,
+        stateRevision: layer.stateRevision,
+      });
+    }
+    hoverPoint = null;
+    latestPointer = null;
+    pointerInside = false;
+    activeStroke = null;
+    removeHoverMarker();
+    hideBrushCursor();
+  }
+
+  function refreshActiveLayerUi(): void {
+    renderMaskPicker();
+    renderMarkers();
+    updatePointControls();
+    updateEditingControls();
+  }
 
   function setNavigationMode(mode: NavigationMode): void {
     navigationMode = mode;
@@ -834,15 +969,15 @@ if (
   positiveTool.addEventListener("click", () => {
     setTool("positive");
     if (hoverPoint) {
-      lastPromptKey = null;
-      submitPrompts(composePrompts(pinnedPoints, hoverPoint));
+      maskLayers.active().lastPromptKey = null;
+      submitPrompts(composePrompts(maskLayers.active().pinnedPoints, hoverPoint), true);
     }
   });
   negativeTool.addEventListener("click", () => {
     setTool("negative");
     if (hoverPoint) {
-      lastPromptKey = null;
-      submitPrompts(composePrompts(pinnedPoints, hoverPoint));
+      maskLayers.active().lastPromptKey = null;
+      submitPrompts(composePrompts(maskLayers.active().pinnedPoints, hoverPoint), true);
     }
   });
   markerTool.addEventListener("click", () => setTool("marker"));
@@ -860,34 +995,39 @@ if (
   });
 
   invertMaskButton.addEventListener("click", () => {
-    if (!maskAvailable) return;
-    editRevision += 1;
-    postWorker({ type: "invert-mask", imageRevision, editRevision });
+    const layer = maskLayers.active();
+    if (!layer.editState.hasMask || !layer.visible) return;
+    layer.editRevision += 1;
+    postWorker({ type: "invert-mask", imageRevision, layerId: layer.id, editRevision: layer.editRevision });
   });
   undoEditButton.addEventListener("click", () => {
-    if (!maskCanUndo) return;
-    editRevision += 1;
-    postWorker({ type: "undo-edit", imageRevision, editRevision });
+    const layer = maskLayers.active();
+    if (!layer.editState.canUndo || !layer.visible) return;
+    layer.editRevision += 1;
+    postWorker({ type: "undo-edit", imageRevision, layerId: layer.id, editRevision: layer.editRevision });
   });
   resetEditsButton.addEventListener("click", () => {
-    if (!maskHasEdits) return;
-    editRevision += 1;
-    postWorker({ type: "reset-edits", imageRevision, editRevision });
+    const layer = maskLayers.active();
+    if (!layer.editState.hasEdits || !layer.visible) return;
+    layer.editRevision += 1;
+    postWorker({ type: "reset-edits", imageRevision, layerId: layer.id, editRevision: layer.editRevision });
   });
 
   undoButton.addEventListener("click", () => {
-    pinnedPoints = removeLastPoint(pinnedPoints);
-    lastPromptKey = null;
+    const layer = maskLayers.active();
+    layer.pinnedPoints = removeLastPoint(layer.pinnedPoints);
+    layer.lastPromptKey = null;
     renderMarkers();
     updatePointControls();
-    submitPrompts(composePrompts(pinnedPoints, hoverPoint));
+    submitPrompts(composePrompts(layer.pinnedPoints, hoverPoint), hoverPoint !== null);
   });
 
   clearButton.addEventListener("click", () => {
-    pinnedPoints = clearPoints();
+    const layer = maskLayers.active();
+    layer.pinnedPoints = clearPoints();
     hoverPoint = null;
     latestPointer = null;
-    lastPromptKey = null;
+    layer.lastPromptKey = null;
     renderMarkers();
     updatePointControls();
     submitPrompts([]);
@@ -895,7 +1035,8 @@ if (
 }
 
 function setTool(tool: ActiveTool): void {
-  if (isBrushTool(tool) && !maskAvailable) return;
+  const layer = maskLayers.active();
+  if (isBrushTool(tool) && (!layer.editState.hasMask || !layer.visible)) return;
   activeTool = tool;
   const controls: Array<[HTMLButtonElement, ActiveTool]> = [
     [positiveTool, "positive"],
@@ -923,7 +1064,7 @@ function setTool(tool: ActiveTool): void {
 
   if (isPointTool(tool) && hoverPoint) {
     hoverPoint = { ...hoverPoint, label: pointLabel(tool) };
-    lastPromptKey = null;
+    layer.lastPromptKey = null;
     updateHoverMarker(hoverPoint);
   } else if (isBrushTool(tool)) {
     hoverPoint = null;
@@ -956,7 +1097,8 @@ function activeBrushDiameter(): number {
 }
 
 function updateBrushCursor(clientX: number, clientY: number): void {
-  if (!isBrushTool(activeTool) || !maskAvailable || !displayImageSize) {
+  const layer = maskLayers.active();
+  if (!isBrushTool(activeTool) || !layer.editState.hasMask || !layer.visible || !displayImageSize) {
     hideBrushCursor();
     return;
   }
@@ -982,29 +1124,83 @@ function hideBrushCursor(): void {
 }
 
 function updateEditingControls(): void {
-  if (!maskAvailable && isBrushTool(activeTool)) setTool("positive");
-  markerTool.disabled = !maskAvailable;
-  eraserTool.disabled = !maskAvailable;
-  markerSize.disabled = !maskAvailable;
-  eraserSize.disabled = !maskAvailable;
-  invertMaskButton.disabled = !maskAvailable;
-  undoEditButton.disabled = !maskCanUndo;
-  resetEditsButton.disabled = !maskHasEdits;
-  invertMaskButton.classList.toggle("active", maskInverted);
-  invertMaskButton.setAttribute("aria-pressed", String(maskInverted));
-  clearButton.disabled = pinnedPoints.length === 0 && !maskAvailable;
+  const layer = maskLayers.active();
+  const editable = layer.visible && layer.editState.hasMask;
+  if (!editable && isBrushTool(activeTool)) setTool("positive");
+  markerTool.disabled = !editable;
+  eraserTool.disabled = !editable;
+  markerSize.disabled = !editable;
+  eraserSize.disabled = !editable;
+  invertMaskButton.disabled = !editable;
+  undoEditButton.disabled = !layer.visible || !layer.editState.canUndo;
+  resetEditsButton.disabled = !layer.visible || !layer.editState.hasEdits;
+  invertMaskButton.classList.toggle("active", layer.editState.inverted);
+  invertMaskButton.setAttribute("aria-pressed", String(layer.editState.inverted));
+  clearButton.disabled = !layer.visible || (layer.pinnedPoints.length === 0 && !layer.editState.hasMask);
+  imageStage.classList.toggle("active-layer-hidden", !layer.visible);
+  if (!layer.visible) hideBrushCursor();
 }
 
 function resetMaskUiState(): void {
   activeStroke = null;
-  maskAvailable = false;
-  maskHasEdits = false;
-  maskCanUndo = false;
-  maskInverted = false;
-  editRevision = 0;
+  maskLayers.reset();
   hideBrushCursor();
   if (isBrushTool(activeTool)) setTool("positive");
+  renderMaskPicker();
   updateEditingControls();
+}
+
+function descriptor(layer: MaskLayer): { id: string; color: string; visible: boolean } {
+  return { id: layer.id, color: layer.color, visible: layer.visible };
+}
+
+function renderMaskPicker(): void {
+  const active = maskLayers.active();
+  const count = maskLayers.all().length;
+  activeLayerSwatch.style.background = active.color;
+  activeLayerName.textContent = active.name;
+  activeLayerName.classList.toggle("hidden-mask", !active.visible);
+  maskCount.textContent = `${count} mask${count === 1 ? "" : "s"}`;
+  maskLayerName.value = active.name;
+  maskLayerColor.value = active.color;
+  deleteMaskButton.disabled = count === 1;
+  addMaskButton.disabled = !imageReady;
+  maskLayerList.replaceChildren();
+  for (const layer of maskLayers.all()) {
+    const row = document.createElement("div");
+    row.className = "mask-layer-row";
+    row.classList.toggle("active", layer.id === active.id);
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(layer.id === active.id));
+
+    const eye = document.createElement("button");
+    eye.type = "button";
+    eye.className = "layer-visibility";
+    eye.dataset.layerVisible = layer.id;
+    eye.setAttribute("aria-pressed", String(layer.visible));
+    eye.setAttribute("aria-label", `${layer.visible ? "Hide" : "Show"} ${layer.name}`);
+    eye.textContent = layer.visible ? "●" : "○";
+
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "layer-select";
+    select.dataset.layerSelect = layer.id;
+    const swatch = document.createElement("span");
+    swatch.className = "layer-swatch";
+    swatch.style.background = layer.color;
+    const name = document.createElement("span");
+    name.textContent = layer.name;
+    select.append(swatch, name);
+    row.append(eye, select);
+    maskLayerList.append(row);
+  }
+}
+
+function setMaskPickerOpen(open: boolean): void {
+  maskPickerMenu.hidden = !open;
+  maskPickerTrigger.setAttribute("aria-expanded", String(open));
+  maskPicker.classList.toggle("open", open);
+  if (open) renderMaskPicker();
 }
 
 function renderDataBrowser(): void {
@@ -1215,7 +1411,9 @@ function setStageSize(width: number, height: number): void {
 
 function renderMarkers(): void {
   markerLayer.innerHTML = "";
-  pinnedPoints.forEach((point) => {
+  const layer = maskLayers.active();
+  if (!layer.visible) return;
+  layer.pinnedPoints.forEach((point) => {
     markerLayer.append(createMarker(point, false));
   });
   if (hoverPoint) markerLayer.append(createMarker(hoverPoint, true));
@@ -1251,9 +1449,10 @@ function applyMarker(marker: HTMLDivElement, point: PointPrompt): void {
 }
 
 function updatePointControls(): void {
-  const count = pinnedPoints.length;
-  undoButton.disabled = count === 0;
-  clearButton.disabled = count === 0 && !maskAvailable;
+  const layer = maskLayers.active();
+  const count = layer.pinnedPoints.length;
+  undoButton.disabled = !layer.visible || count === 0;
+  clearButton.disabled = !layer.visible || (count === 0 && !layer.editState.hasMask);
   pointCount.textContent = `${count} pinned`;
 }
 

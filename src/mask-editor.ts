@@ -9,6 +9,7 @@ interface Snapshot {
   forceOn: Uint8Array;
   forceOff: Uint8Array;
   inverted: boolean;
+  serial: number;
 }
 
 export interface MaskEditState {
@@ -19,6 +20,7 @@ export interface MaskEditState {
 }
 
 export class MaskEditor {
+  private static nextHistorySerial = 0;
   private readonly historyLimit: number;
   private width = 0;
   private height = 0;
@@ -62,6 +64,14 @@ export class MaskEditor {
     }
     this.base.set(mask);
     this.clearPaddingBits(this.base);
+  }
+
+  clearBaseMask(): void {
+    if (this.width > 0) this.base.fill(0);
+  }
+
+  baseMask(): Uint8Array {
+    return this.base.slice();
   }
 
   clearMask(): void {
@@ -137,6 +147,22 @@ export class MaskEditor {
     this.inverted = false;
     this.history = [];
     this.cancelStroke();
+  }
+
+  historyBytes(): number {
+    return this.history.reduce(
+      (total, snapshot) =>
+        total + snapshot.forceOn.byteLength + snapshot.forceOff.byteLength + 9,
+      0,
+    );
+  }
+
+  oldestHistorySerial(): number | undefined {
+    return this.history[0]?.serial;
+  }
+
+  discardOldestHistory(): boolean {
+    return this.history.shift() !== undefined;
   }
 
   state(): MaskEditState {
@@ -259,6 +285,7 @@ export class MaskEditor {
       forceOn: this.forceOn.slice(),
       forceOff: this.forceOff.slice(),
       inverted: this.inverted,
+      serial: ++MaskEditor.nextHistorySerial,
     };
   }
 

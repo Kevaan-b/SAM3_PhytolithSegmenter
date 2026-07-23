@@ -277,6 +277,7 @@ describe("browser UI with a mocked inference worker", () => {
     worker.emit({
       type: "edit-state",
       imageRevision: latestLoad.imageRevision,
+      layerId: latestLoad.activeLayerId,
       editRevision: 0,
       hasMask: true,
       hasEdits: false,
@@ -330,6 +331,7 @@ describe("browser UI with a mocked inference worker", () => {
     worker.emit({
       type: "edit-state",
       imageRevision: latestLoad.imageRevision,
+      layerId: latestLoad.activeLayerId,
       editRevision: 1,
       hasMask: true,
       hasEdits: true,
@@ -341,6 +343,7 @@ describe("browser UI with a mocked inference worker", () => {
     worker.emit({
       type: "edit-state",
       imageRevision: latestLoad.imageRevision,
+      layerId: latestLoad.activeLayerId,
       editRevision: 2,
       hasMask: true,
       hasEdits: true,
@@ -367,6 +370,51 @@ describe("browser UI with a mocked inference worker", () => {
       radius: 30,
     });
     expect(markerSize.value).toBe("40");
+    stage.dispatchEvent(pointerEvent("pointerup", 10, 110, 70));
+
+    document.querySelector<HTMLButtonElement>("#add-mask")!.click();
+    const created = [...worker.messages].reverse().find(
+      (message) => message.type === "create-layer",
+    );
+    expect(created).toMatchObject({ type: "create-layer", layer: { visible: true } });
+    if (!created || created.type !== "create-layer") throw new Error("Layer was not created.");
+    expect(document.querySelectorAll(".mask-layer-row")).toHaveLength(2);
+    expect(document.querySelector("#mask-count")?.textContent).toBe("2 masks");
+
+    const eye = document.querySelector<HTMLButtonElement>(
+      `[data-layer-visible="${created.layer.id}"]`,
+    )!;
+    eye.click();
+    expect(worker.messages.at(-1)).toMatchObject({
+      type: "update-layer",
+      layerId: created.layer.id,
+      visible: false,
+    });
+    expect(markerTool.disabled).toBe(true);
+    const messagesWhileHidden = worker.messages.length;
+    stage.dispatchEvent(pointerEvent("pointerenter", 11, 110, 70));
+    stage.dispatchEvent(pointerEvent("pointermove", 11, 120, 70));
+    stage.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: 120, clientY: 70 }));
+    await Promise.resolve();
+    expect(worker.messages).toHaveLength(messagesWhileHidden);
+
+    eye.click();
+    const name = document.querySelector<HTMLInputElement>("#mask-layer-name")!;
+    name.value = "Class A";
+    name.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(document.querySelector("#active-layer-name")?.textContent).toBe("Class A");
+    const color = document.querySelector<HTMLInputElement>("#mask-layer-color")!;
+    color.value = "#112233";
+    color.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(worker.messages.at(-1)).toMatchObject({
+      type: "update-layer",
+      layerId: created.layer.id,
+      color: "#112233",
+    });
+    document.querySelector<HTMLButtonElement>("#delete-mask")!.click();
+    expect(worker.messages.some((message) => message.type === "delete-layer" && message.layerId === created.layer.id)).toBe(true);
+    expect(document.querySelectorAll(".mask-layer-row")).toHaveLength(1);
+    expect(document.querySelector<HTMLButtonElement>("#delete-mask")!.disabled).toBe(true);
   });
 });
 
