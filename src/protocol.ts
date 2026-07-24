@@ -20,6 +20,11 @@ export interface LayerDescriptor {
   visible: boolean;
 }
 
+export interface RestoredMask {
+  layerId: string;
+  mask: Uint8Array;
+}
+
 export type MainToWorkerMessage =
   | {
       type: "initialize";
@@ -32,6 +37,9 @@ export type MainToWorkerMessage =
       url: string;
       layers: LayerDescriptor[];
       activeLayerId: string;
+      preventOverlap: boolean;
+      restoredMasks: RestoredMask[];
+      latestMaskLayerId?: string;
     }
   | {
       type: "decode";
@@ -86,6 +94,17 @@ export type MainToWorkerMessage =
       imageRevision: number;
       layerId: string;
       stateRevision: number;
+    }
+  | {
+      type: "set-overlap-prevention";
+      imageRevision: number;
+      enabled: boolean;
+      activeLayerId: string;
+    }
+  | {
+      type: "snapshot-annotations";
+      requestId: string;
+      imageRevision: number;
     };
 
 export type WorkerToMainMessage =
@@ -147,4 +166,13 @@ export type WorkerToMainMessage =
       hasEdits: boolean;
       canUndo: boolean;
       inverted: boolean;
+    }
+  | {
+      type: "annotation-snapshot";
+      requestId: string;
+      imageRevision: number;
+      width: number;
+      height: number;
+      latestMaskLayerId: string;
+      layers: Array<{ layerId: string; rawMask: Uint8Array; effectiveMask: Uint8Array }>;
     };

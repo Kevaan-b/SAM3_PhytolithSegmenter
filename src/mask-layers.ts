@@ -16,6 +16,8 @@ export interface MaskLayer {
   id: string;
   name: string;
   color: string;
+  categoryId: number;
+  annotationId?: number;
   visible: boolean;
   pinnedPoints: PointPrompt[];
   stateRevision: number;
@@ -33,19 +35,21 @@ export class MaskLayerCollection {
     this.reset();
   }
 
-  reset(): MaskLayer {
+  reset(categoryId = 1, name = "object", color: string = MASK_PALETTE[0]): MaskLayer {
     this.layers = [];
     this.activeId = "";
     this.nextNumber = 1;
-    return this.add();
+    return this.add(categoryId, name, color);
   }
 
-  add(): MaskLayer {
+  add(categoryId = 1, name?: string, color?: string, id?: string, annotationId?: number): MaskLayer {
     const number = this.nextNumber++;
     const layer = createLayer(
-      this.makeId(),
-      `Mask ${number}`,
-      MASK_PALETTE[(number - 1) % MASK_PALETTE.length]!,
+      id ?? this.makeId(),
+      name ?? `Mask ${number}`,
+      color ?? MASK_PALETTE[(number - 1) % MASK_PALETTE.length]!,
+      categoryId,
+      annotationId,
     );
     this.layers.push(layer);
     this.activeId = layer.id;
@@ -93,6 +97,23 @@ export class MaskLayerCollection {
     this.require(id).visible = visible;
   }
 
+  setCategory(id: string, categoryId: number, name: string, color: string): void {
+    const layer = this.require(id);
+    layer.categoryId = categoryId;
+    layer.name = name;
+    layer.color = color;
+  }
+
+  replace(items: Array<{ id: string; categoryId: number; annotationId?: number; name: string; color: string }>): MaskLayer {
+    this.layers = [];
+    this.activeId = "";
+    this.nextNumber = 1;
+    for (const item of items) this.add(item.categoryId, item.name, item.color, item.id, item.annotationId);
+    if (this.layers.length === 0) return this.reset();
+    this.activeId = this.layers[0]!.id;
+    return this.active();
+  }
+
   private require(id: string): MaskLayer {
     const layer = this.layers.find((item) => item.id === id);
     if (!layer) throw new Error("Unknown mask layer.");
@@ -100,9 +121,9 @@ export class MaskLayerCollection {
   }
 }
 
-function createLayer(id: string, name: string, color: string): MaskLayer {
+function createLayer(id: string, name: string, color: string, categoryId: number, annotationId?: number): MaskLayer {
   return {
-    id, name, color, visible: true, pinnedPoints: [], stateRevision: 0, editRevision: 0,
+    id, name, color, categoryId, annotationId, visible: true, pinnedPoints: [], stateRevision: 0, editRevision: 0,
     lastPromptKey: null,
     editState: { hasMask: false, hasEdits: false, canUndo: false, inverted: false },
   };

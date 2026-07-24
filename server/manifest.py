@@ -35,6 +35,8 @@ def scan_data(data_root: Path) -> tuple[dict, dict[str, ImageRecord]]:
         for entry in sorted(folder.iterdir(), key=lambda item: natural_key(item.name)):
             if entry.name.startswith(".") or entry.is_symlink():
                 continue
+            if not relative.parts and entry.name in {"annotations", "metadata"}:
+                continue
             child_relative = relative / entry.name
             if entry.is_dir():
                 folders.append(scan(entry, child_relative, entry.name))

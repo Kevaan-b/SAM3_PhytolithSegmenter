@@ -71,6 +71,24 @@ class MockWorker {
 
   postMessage(message: MainToWorkerMessage): void {
     this.messages.push(message);
+    if (message.type === "snapshot-annotations") {
+      const load = [...this.messages].reverse().find(
+        (item): item is Extract<MainToWorkerMessage, { type: "load-image" }> => item.type === "load-image",
+      );
+      queueMicrotask(() => this.emit({
+        type: "annotation-snapshot",
+        requestId: message.requestId,
+        imageRevision: message.imageRevision,
+        width: 982,
+        height: 996,
+        latestMaskLayerId: load?.activeLayerId ?? "",
+        layers: (load?.layers ?? []).map((layer) => ({
+          layerId: layer.id,
+          rawMask: new Uint8Array(Math.ceil((982 * 996) / 8)),
+          effectiveMask: new Uint8Array(Math.ceil((982 * 996) / 8)),
+        })),
+      }));
+    }
   }
 
   emit(message: WorkerToMainMessage): void {
@@ -96,14 +114,25 @@ describe("browser UI with a mocked inference worker", () => {
       },
     );
     vi.stubGlobal("Worker", MockWorker);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        status: 200,
-        json: async () => DATA_TREE,
-      })),
-    );
+    let category = { id: 1, name: "object", supercategory: "phytolith", color: "#4094dc", active: true };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      let body: unknown = DATA_TREE;
+      if (url === "/api/classes" && (!init?.method || init.method === "GET")) {
+        body = { schema_version: 1, next_category_id: 2, categories: [category] };
+      } else if (/\/api\/classes\/1$/.test(url) && init?.method === "PATCH") {
+        category = { ...category, ...JSON.parse(String(init.body)) };
+        body = category;
+      } else if (/\/api\/classes\/1$/.test(url) && init?.method === "DELETE") {
+        category = { ...category, active: false };
+        body = category;
+      } else if (/\/api\/images\/[^/]+\/annotations$/.test(url) && (!init?.method || init.method === "GET")) {
+        body = { imageId: "draft", layers: [], latestMaskLayerId: null, preventOverlap: false };
+      } else if (/\/api\/images\/[^/]+\/annotations$/.test(url) && init?.method === "PUT") {
+        body = { savedLayers: 1, emptyLayers: 0 };
+      }
+      return { ok: true, status: 200, json: async () => body };
+    }));
     vi.stubGlobal(
       "requestAnimationFrame",
       (callback: FrameRequestCallback) => {
@@ -126,6 +155,8 @@ describe("browser UI with a mocked inference worker", () => {
     });
 
     worker.emit({ type: "model-ready" });
+    await Promise.resolve();
+    await Promise.resolve();
     expect(worker.messages.at(-1)).toMatchObject({
       type: "load-image",
       imageRevision: 1,
@@ -134,6 +165,8 @@ describe("browser UI with a mocked inference worker", () => {
     });
 
     document.querySelector<HTMLButtonElement>("#next-button")!.click();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(
       document.querySelector("#folder-tree-value")?.textContent,
     ).toBe("Data / val");
@@ -155,12 +188,16 @@ describe("browser UI with a mocked inference worker", () => {
     treeMenu
       .querySelector<HTMLButtonElement>('[data-folder-path="train"]')!
       .click();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(treeMenu.hidden).toBe(true);
 
     const imageSelect =
       document.querySelector<HTMLSelectElement>("#image-select")!;
     imageSelect.value = "train/train-b.png";
     imageSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
     expect(
       document.querySelector<HTMLButtonElement>("#navigate-folders")
         ?.getAttribute("aria-pressed"),
@@ -176,6 +213,8 @@ describe("browser UI with a mocked inference worker", () => {
     ).toBe(true);
 
     document.querySelector<HTMLButtonElement>("#previous-button")!.click();
+    await Promise.resolve();
+    await Promise.resolve();
     expect(imageSelect.value).toBe("train/train-a.png");
 
     const latestLoad = [...worker.messages]
@@ -245,6 +284,14 @@ describe("browser UI with a mocked inference worker", () => {
       type: "decode",
       points: [{ x: 0.5, y: 0.5, label: 0 }],
     });
+    document.querySelector<HTMLButtonElement>("#save-annotations")!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
+      String(url).includes("/annotations") && init?.method === "PUT"
+    )).toBe(true);
+    expect(document.querySelector("#save-status")?.textContent).toBe("Saved");
 
     document.querySelector<HTMLButtonElement>("#undo-button")!.click();
     expect(document.querySelector("#point-count")?.textContent).toBe(
@@ -373,6 +420,7 @@ describe("browser UI with a mocked inference worker", () => {
     stage.dispatchEvent(pointerEvent("pointerup", 10, 110, 70));
 
     document.querySelector<HTMLButtonElement>("#add-mask")!.click();
+    document.querySelector<HTMLButtonElement>("#add-mask-confirm")!.click();
     const created = [...worker.messages].reverse().find(
       (message) => message.type === "create-layer",
     );
@@ -402,10 +450,14 @@ describe("browser UI with a mocked inference worker", () => {
     const name = document.querySelector<HTMLInputElement>("#mask-layer-name")!;
     name.value = "Class A";
     name.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(document.querySelector("#active-layer-name")?.textContent).toBe("Class A");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(document.querySelector("#active-layer-name")?.textContent).toBe("Class A · 2");
     const color = document.querySelector<HTMLInputElement>("#mask-layer-color")!;
     color.value = "#112233";
-    color.dispatchEvent(new Event("input", { bubbles: true }));
+    color.dispatchEvent(new Event("change", { bubbles: true }));
+    await Promise.resolve();
+    await Promise.resolve();
     expect(worker.messages.at(-1)).toMatchObject({
       type: "update-layer",
       layerId: created.layer.id,
@@ -415,6 +467,14 @@ describe("browser UI with a mocked inference worker", () => {
     expect(worker.messages.some((message) => message.type === "delete-layer" && message.layerId === created.layer.id)).toBe(true);
     expect(document.querySelectorAll(".mask-layer-row")).toHaveLength(1);
     expect(document.querySelector<HTMLButtonElement>("#delete-mask")!.disabled).toBe(true);
+
+    const preventOverlap = document.querySelector<HTMLInputElement>("#prevent-mask-overlap")!;
+    preventOverlap.checked = true;
+    preventOverlap.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(worker.messages.at(-1)).toMatchObject({
+      type: "set-overlap-prevention",
+      enabled: true,
+    });
   });
 });
 

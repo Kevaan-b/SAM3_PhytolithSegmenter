@@ -373,6 +373,32 @@ button:focus-visible {
   overflow-y: auto;
 }
 
+.new-instance-row {
+  padding: 2px 2px 7px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.new-instance-row select,
+.new-instance-row button,
+#mask-layer-class {
+  height: 31px;
+  min-width: 0;
+  padding: 0 7px;
+  color: #4d5951;
+  background: var(--paper);
+  border: 1px solid rgba(29, 36, 32, 0.14);
+  border-radius: 3px;
+  font-size: 9px;
+}
+
+.new-instance-row button {
+  color: var(--green-deep);
+  cursor: pointer;
+  font-weight: 600;
+}
+
 .mask-layer-row {
   display: grid;
   grid-template-columns: 30px minmax(0, 1fr);
@@ -440,12 +466,17 @@ button:focus-visible {
   text-transform: uppercase;
 }
 
+#mask-layer-class {
+  grid-column: 2 / 4;
+}
+
 .mask-layer-editor input[type="text"],
 .mask-layer-editor input:not([type]) {
   min-width: 0;
 }
 
 #mask-layer-name {
+  grid-column: 2 / 4;
   height: 30px;
   padding: 0 7px;
   border: 1px solid rgba(29, 36, 32, 0.14);
@@ -455,6 +486,7 @@ button:focus-visible {
 }
 
 #mask-layer-color {
+  grid-column: 2;
   width: 34px;
   height: 30px;
   padding: 2px;
@@ -474,9 +506,69 @@ button:focus-visible {
   font-size: 9px;
 }
 
+.new-class-button,
+.archive-class-button {
+  padding: 4px 0;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.new-class-button {
+  grid-column: 2;
+  justify-self: start;
+  color: var(--green-deep);
+}
+
+.archive-class-button {
+  grid-column: 3;
+  justify-self: end;
+  color: var(--red);
+}
+
+.archive-class-button:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
 .delete-mask-button:disabled {
   cursor: default;
   opacity: 0.35;
+}
+
+.overlap-toggle {
+  margin: 2px 8px 5px;
+  padding: 9px 0 3px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid rgba(29, 36, 32, 0.09);
+  cursor: pointer;
+}
+
+.overlap-toggle span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.overlap-toggle strong {
+  color: #4d5951;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.overlap-toggle small {
+  color: #89928c;
+  font-size: 8px;
+}
+
+.overlap-toggle input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--green);
 }
 
 .tree-row {
@@ -808,6 +900,39 @@ button:focus-visible {
   font-family: "Instrument Serif", Georgia, serif;
   font-size: 23px;
   font-weight: 400;
+}
+
+.save-controls {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.save-controls span {
+  max-width: 190px;
+  overflow: hidden;
+  color: #7d8780;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.save-controls button {
+  min-height: 29px;
+  padding: 0 13px;
+  color: white;
+  background: var(--green-deep);
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 9px;
+}
+
+.save-controls button:disabled {
+  color: #7d8780;
+  background: rgba(29, 36, 32, 0.08);
+  cursor: default;
 }
 
 .status-chip {

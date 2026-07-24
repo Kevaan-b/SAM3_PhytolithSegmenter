@@ -69,8 +69,22 @@ Supported file extensions are PNG, JPEG, WebP, GIF, BMP, TIFF, and AVIF.
   refine it with independent source-pixel brush sizes.
 - **Invert mask** shows the exact complement. **Undo edit** reverts one whole
   stroke or inversion, while **Reset edits** returns to the latest SAM mask.
-- Manual edits stay applied when SAM produces a newer mask and reset when you
-  change images. Brush edits never call the H100 service.
+- Manual edits stay applied when SAM produces a newer mask. They are flattened
+  into the saved image draft across navigation; per-stroke undo history resets
+  when the image is reloaded. Brush edits never call the H100 service.
+
+## Classes and COCO annotations
+
+Classes are defined in `data/metadata/categories.json`. The Masks popover can
+add, rename, recolor, and remove classes, then create any number of independent
+instances from the class list. Removed classes remain valid for annotations
+that already reference their stable numeric ID.
+
+Annotation changes autosave after a short delay and can also be saved with the
+**Save** button or `Ctrl/Cmd+S`. Editable per-image drafts live under
+`data/.samotator/annotations/`. Standards-compliant COCO instance segmentation
+files are regenerated atomically under `data/annotations/`, using compressed
+RLE masks with bounding boxes and areas derived from the final binary masks.
 
 The files under `sam3-q4/` must remain in their existing layout because both
 ONNX graphs reference their adjacent `.onnx_data` files by name.

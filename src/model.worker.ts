@@ -2,10 +2,11 @@
 
 import type { LayerDescriptor, MainToWorkerMessage, WorkerToMainMessage } from "./protocol";
 import { MaskEditor } from "./mask-editor";
-import { compositeMasks } from "./mask-compositor";
+import { compositeMasks, excludeOverlaps } from "./mask-compositor";
 
 type LoadImageMessage = Extract<MainToWorkerMessage, { type: "load-image" }>;
 type DecodeMessage = Extract<MainToWorkerMessage, { type: "decode" }>;
+type SnapshotMessage = Extract<MainToWorkerMessage, { type: "snapshot-annotations" }>;
 
 const worker = self as DedicatedWorkerGlobalScope;
 let canvas: OffscreenCanvas | undefined;
@@ -18,10 +19,13 @@ let activeImageRevision = -1;
 let desiredImageRevision = -1;
 let pendingImage: LoadImageMessage | undefined;
 let pendingDecode: DecodeMessage | undefined;
+let pendingSnapshot: SnapshotMessage | undefined;
 let activePrepare: AbortController | undefined;
 const latestStateRevision = new Map<string, number>();
 const maskLayers = new Map<string, WorkerLayer>();
 let activeLayerId = "";
+let latestMaskLayerId = "";
+let preventOverlap = false;
 let activeStrokeId = -1;
 let activeStrokeLayerId = "";
 const HISTORY_BUDGET = 64 * 1024 * 1024;
@@ -45,8 +49,10 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
       return;
     case "load-image":
       desiredImageRevision = data.imageRevision;
+      preventOverlap = data.preventOverlap;
       pendingImage = data;
       pendingDecode = undefined;
+      pendingSnapshot = undefined;
       latestStateRevision.clear();
       activePrepare?.abort();
       clearOverlay();
@@ -66,6 +72,7 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
       latestStateRevision.set(data.layerId, data.stateRevision);
       if (pendingDecode?.layerId === data.layerId) pendingDecode = undefined;
       const layer = getLayer(data.layerId);
+      latestMaskLayerId = data.layerId;
       layer.editor.clearMask();
       layer.lockedMask = undefined;
       layer.previewing = false;
@@ -77,6 +84,7 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
     case "brush": {
       if (data.imageRevision !== activeImageRevision || data.imageRevision !== desiredImageRevision) return;
       try {
+        latestMaskLayerId = data.layerId;
         if (data.phase === "begin") {
           const first = data.points[0];
           if (!first) return;
@@ -107,6 +115,7 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
     case "reset-edits": {
       if (data.imageRevision !== activeImageRevision || data.imageRevision !== desiredImageRevision) return;
       try {
+        latestMaskLayerId = data.layerId;
         const editor = getLayer(data.layerId).editor;
         if (data.type === "invert-mask") commitPreview(getLayer(data.layerId));
         if (data.type === "invert-mask") editor.toggleInvert();
@@ -156,7 +165,16 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
       maskLayers.delete(data.layerId);
       latestStateRevision.delete(data.layerId);
       if (activeLayerId === data.layerId) activeLayerId = maskLayers.keys().next().value ?? "";
+      if (latestMaskLayerId === data.layerId) latestMaskLayerId = activeLayerId;
       renderMasks();
+      return;
+    }
+    case "set-overlap-prevention": {
+      preventOverlap = data.enabled;
+      if (data.imageRevision === activeImageRevision && maskLayers.has(data.activeLayerId)) {
+        latestMaskLayerId = data.activeLayerId;
+        renderMasks();
+      }
       return;
     }
     case "cancel-preview": {
@@ -167,6 +185,12 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
       if (pendingDecode?.layerId === data.layerId && pendingDecode.preview) pendingDecode = undefined;
       restoreLockedMask(getLayer(data.layerId));
       renderMasks();
+      return;
+    }
+    case "snapshot-annotations": {
+      if (data.imageRevision !== activeImageRevision) return;
+      pendingSnapshot = data;
+      void pump();
       return;
     }
   }
@@ -201,7 +225,7 @@ async function pump(): Promise<void> {
   if (processing || !serviceReady) return;
   processing = true;
   try {
-    while (pendingImage || pendingDecode) {
+    while (pendingImage || pendingDecode || pendingSnapshot) {
       if (pendingImage) {
         const next = pendingImage;
         pendingImage = undefined;
@@ -211,11 +235,15 @@ async function pump(): Promise<void> {
         const next = pendingDecode;
         pendingDecode = undefined;
         await decode(next);
+      } else if (pendingSnapshot) {
+        const next = pendingSnapshot;
+        pendingSnapshot = undefined;
+        snapshotAnnotations(next);
       }
     }
   } finally {
     processing = false;
-    if (pendingImage || pendingDecode) void pump();
+    if (pendingImage || pendingDecode || pendingSnapshot) void pump();
   }
 }
 
@@ -235,7 +263,10 @@ async function loadImage(message: LoadImageMessage): Promise<void> {
     if (message.imageRevision !== desiredImageRevision) return;
     activeImageId = message.imageId;
     activeImageRevision = message.imageRevision;
-    prepareOverlay(result.width, result.height, message.layers, message.activeLayerId);
+    prepareOverlay(
+      result.width, result.height, message.layers, message.activeLayerId,
+      message.restoredMasks, message.latestMaskLayerId,
+    );
     post({
       type: "image-ready",
       imageRevision: message.imageRevision,
@@ -288,7 +319,14 @@ async function decode(message: DecodeMessage): Promise<void> {
   }
 }
 
-function prepareOverlay(width: number, height: number, layers: LayerDescriptor[], nextActiveLayerId: string): void {
+function prepareOverlay(
+  width: number,
+  height: number,
+  layers: LayerDescriptor[],
+  nextActiveLayerId: string,
+  restoredMasks: Array<{ layerId: string; mask: Uint8Array }>,
+  restoredLatestLayerId?: string,
+): void {
   if (!canvas || !context) throw new Error("Overlay canvas is unavailable.");
   canvas.width = width;
   canvas.height = height;
@@ -297,10 +335,50 @@ function prepareOverlay(width: number, height: number, layers: LayerDescriptor[]
   layers.forEach((layer) => createWorkerLayer(layer, width, height));
   if (!maskLayers.has(nextActiveLayerId)) throw new Error("The active mask layer is missing.");
   activeLayerId = nextActiveLayerId;
+  latestMaskLayerId = restoredLatestLayerId && maskLayers.has(restoredLatestLayerId)
+    ? restoredLatestLayerId : nextActiveLayerId;
+  for (const restored of restoredMasks) {
+    const layer = getLayer(restored.layerId);
+    layer.editor.setBaseMask(restored.mask);
+    layer.lockedMask = restored.mask.slice();
+  }
   activeStrokeId = -1;
   activeStrokeLayerId = "";
   pixels = context.createImageData(width, height);
   renderMasks();
+  for (const layer of maskLayers.values()) postEditState(activeImageRevision, layer.id, 0);
+}
+
+function snapshotAnnotations(message: SnapshotMessage): void {
+  if (!canvas || message.imageRevision !== activeImageRevision) return;
+  for (const layer of maskLayers.values()) restoreLockedMask(layer);
+  const raw = new Map<string, Uint8Array>();
+  for (const layer of maskLayers.values()) raw.set(layer.id, layer.editor.displayedMask());
+  const effective = new Map(raw);
+  if (preventOverlap && latestMaskLayerId && effective.has(latestMaskLayerId)) {
+    effective.set(
+      latestMaskLayerId,
+      excludeOverlaps(
+        effective.get(latestMaskLayerId)!,
+        [...raw.entries()].filter(([id]) => id !== latestMaskLayerId).map(([, mask]) => mask),
+        canvas.width * canvas.height,
+      ),
+    );
+  }
+  renderMasks();
+  post({
+    type: "annotation-snapshot",
+    requestId: message.requestId,
+    imageRevision: message.imageRevision,
+    width: canvas.width,
+    height: canvas.height,
+    latestMaskLayerId,
+    layers: [...maskLayers.keys()].map((layerId) => ({
+      layerId,
+      rawMask: raw.get(layerId)!,
+      effectiveMask: effective.get(layerId)!,
+    })),
+  });
 }
 
 function drawMask(mask: Uint8Array, width: number, height: number, layerId: string, preview: boolean): void {
@@ -308,6 +386,7 @@ function drawMask(mask: Uint8Array, width: number, height: number, layerId: stri
   const count = width * height;
   if (mask.byteLength !== Math.ceil(count / 8)) throw new Error("The H100 service returned an invalid mask size.");
   const layer = getLayer(layerId);
+  latestMaskLayerId = layerId;
   layer.editor.setBaseMask(mask);
   layer.previewing = preview;
   if (!preview) layer.lockedMask = mask.slice();
@@ -317,14 +396,23 @@ function drawMask(mask: Uint8Array, width: number, height: number, layerId: stri
 
 function renderMasks(): void {
   if (!context || !pixels || !canvas) return;
+  const displayed = new Map<string, Uint8Array>();
+  for (const layer of maskLayers.values()) displayed.set(layer.id, layer.editor.displayedMask());
+  if (preventOverlap && latestMaskLayerId && displayed.has(latestMaskLayerId)) {
+    const latest = displayed.get(latestMaskLayerId)!;
+    const blockers = [...displayed.entries()]
+      .filter(([id]) => id !== latestMaskLayerId)
+      .map(([, mask]) => mask);
+    displayed.set(latestMaskLayerId, excludeOverlaps(latest, blockers, canvas.width * canvas.height));
+  }
   const layers = [];
   for (const layer of maskLayers.values()) {
     if (layer.visible && layer.id !== activeLayerId) {
-      layers.push({ mask: layer.editor.displayedMask(), color: layer.color, alpha: 0.34 });
+      layers.push({ mask: displayed.get(layer.id)!, color: layer.color, alpha: 0.34 });
     }
   }
   const active = maskLayers.get(activeLayerId);
-  if (active?.visible) layers.push({ mask: active.editor.displayedMask(), color: active.color, alpha: 0.5 });
+  if (active?.visible) layers.push({ mask: displayed.get(active.id)!, color: active.color, alpha: 0.5 });
   compositeMasks(pixels.data, canvas.width * canvas.height, layers);
   context.putImageData(pixels, 0, 0);
 }
@@ -333,6 +421,7 @@ function clearOverlay(): void {
   maskLayers.clear();
   latestStateRevision.clear();
   activeLayerId = "";
+  latestMaskLayerId = "";
   activeStrokeId = -1;
   activeStrokeLayerId = "";
   pixels = undefined;

@@ -10,10 +10,12 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from .engine import SamEngine
+from .annotations import AnnotationStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 GPU_BUDGET_GIB = float(os.environ.get("SAMOTATOR_GPU_CACHE_GIB", "16"))
 engine = SamEngine(PROJECT_ROOT, GPU_BUDGET_GIB)
+annotations = AnnotationStore(PROJECT_ROOT / "data", engine.get_record)
 
 
 @asynccontextmanager
@@ -45,6 +47,34 @@ class SegmentRequest(BaseModel):
     points: list[Point] = Field(min_length=1)
 
 
+class CategoryCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    supercategory: str = Field(default="phytolith", min_length=1, max_length=80)
+    color: str | None = None
+
+
+class CategoryUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    supercategory: str | None = Field(default=None, min_length=1, max_length=80)
+    color: str | None = None
+    active: bool | None = None
+
+
+class AnnotationLayer(BaseModel):
+    layerId: str = Field(min_length=1, max_length=128)
+    categoryId: int = Field(ge=1)
+    rawMask: str
+    effectiveMask: str
+
+
+class AnnotationSave(BaseModel):
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    latestMaskLayerId: str | None = None
+    preventOverlap: bool = False
+    layers: list[AnnotationLayer]
+
+
 def require_ready() -> None:
     if engine.error:
         raise HTTPException(status_code=503, detail=engine.error)
@@ -60,6 +90,64 @@ def status():
 @app.get("/api/data-tree")
 def data_tree(refresh: bool = False):
     return engine.refresh_manifest() if refresh else engine.manifest()
+
+
+@app.get("/api/classes")
+def classes():
+    try:
+        return annotations.categories()
+    except ValueError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+@app.post("/api/classes")
+def add_class(request: CategoryCreate):
+    try:
+        return annotations.add_category(request.name, request.supercategory, request.color)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.patch("/api/classes/{category_id}")
+def update_class(category_id: int, request: CategoryUpdate):
+    try:
+        return annotations.update_category(category_id, request.model_dump(exclude_none=True))
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.delete("/api/classes/{category_id}")
+def archive_class(category_id: int):
+    try:
+        return annotations.archive_category(category_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.get("/api/images/{image_id}/annotations")
+def image_annotations(image_id: str):
+    try:
+        return annotations.load_image(image_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@app.put("/api/images/{image_id}/annotations")
+def save_image_annotations(image_id: str, request: AnnotationSave):
+    try:
+        return annotations.save_image(
+            image_id, request.width, request.height,
+            [layer.model_dump() for layer in request.layers],
+            request.latestMaskLayerId, request.preventOverlap,
+        )
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @app.post("/api/images/prepare")

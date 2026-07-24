@@ -10,7 +10,7 @@ describe("MaskLayerCollection", () => {
   it("always starts with one visible active layer", () => {
     const layers = collection();
     expect(layers.all()).toHaveLength(1);
-    expect(layers.active()).toMatchObject({ id: "layer-1", name: "Mask 1", color: MASK_PALETTE[0], visible: true });
+    expect(layers.active()).toMatchObject({ id: "layer-1", name: "object", categoryId: 1, color: MASK_PALETTE[0], visible: true });
   });
 
   it("adds unlimited independently named and colored layers", () => {

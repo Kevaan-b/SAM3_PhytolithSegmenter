@@ -4,6 +4,26 @@ export interface CompositeLayer {
   alpha: number;
 }
 
+export function excludeOverlaps(
+  mask: Uint8Array,
+  blockers: readonly Uint8Array[],
+  pixelCount: number,
+): Uint8Array {
+  const byteLength = Math.ceil(pixelCount / 8);
+  if (mask.byteLength !== byteLength || blockers.some((item) => item.byteLength !== byteLength)) {
+    throw new Error("Mask dimensions do not match.");
+  }
+  const output = mask.slice();
+  for (const blocker of blockers) {
+    for (let index = 0; index < byteLength; index += 1) {
+      output[index] = output[index]! & ~blocker[index]!;
+    }
+  }
+  const remainder = pixelCount & 7;
+  if (remainder !== 0) output[byteLength - 1] = output[byteLength - 1]! & ((1 << remainder) - 1);
+  return output;
+}
+
 export function compositeMasks(
   target: Uint8ClampedArray,
   pixelCount: number,

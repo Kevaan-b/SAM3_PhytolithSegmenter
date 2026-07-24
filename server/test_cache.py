@@ -52,9 +52,12 @@ def test_manifest_is_recursive_and_ignores_symlinks(tmp_path: Path):
     image = nested / "sample.png"
     image.write_bytes(b"image")
     (nested / "ignored.txt").write_text("no")
+    (data / "metadata").mkdir()
+    (data / "annotations").mkdir()
     (data / "escape.png").symlink_to(image)
     tree, records = scan_data(data)
     found = tree["folders"][0]["folders"][0]["images"][0]
     assert found["id"] == image_id("train/nested/sample.png")
     assert found["url"] == "/data/train/nested/sample.png"
     assert len(records) == 1
+    assert [folder["name"] for folder in tree["folders"]] == ["train"]

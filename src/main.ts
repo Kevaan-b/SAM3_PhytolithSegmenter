@@ -123,14 +123,29 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
               <button class="add-mask-button" id="add-mask" type="button" aria-label="Add mask layer">+</button>
             </div>
             <div class="mask-picker-menu" id="mask-picker-menu" hidden>
+              <div class="new-instance-row">
+                <select id="new-mask-class" aria-label="Class for new mask"></select>
+                <button id="add-mask-confirm" type="button">Add instance</button>
+              </div>
               <div class="mask-layer-list" id="mask-layer-list" role="listbox" aria-label="Mask layers"></div>
               <div class="mask-layer-editor">
+                <label for="mask-layer-class">Class</label>
+                <select id="mask-layer-class"></select>
                 <label for="mask-layer-name">Name</label>
                 <input id="mask-layer-name" maxlength="80" />
                 <label for="mask-layer-color">Color</label>
                 <input id="mask-layer-color" type="color" />
+                <button class="new-class-button" id="new-class" type="button">New class</button>
+                <button class="archive-class-button" id="archive-class" type="button">Remove class</button>
                 <button class="delete-mask-button" id="delete-mask" type="button">Delete mask</button>
               </div>
+              <label class="overlap-toggle" for="prevent-mask-overlap">
+                <span>
+                  <strong>Prevent overlaps</strong>
+                  <small>Clip the latest mask against all others</small>
+                </span>
+                <input id="prevent-mask-overlap" type="checkbox" />
+              </label>
             </div>
           </div>
         </section>
@@ -208,6 +223,10 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
             <span class="status-light"></span>
             <span id="status-label">Connecting to H100…</span>
           </div>
+          <div class="save-controls">
+            <span id="save-status">Saved</span>
+            <button id="save-annotations" type="button" disabled>Save</button>
+          </div>
         </div>
 
         <div class="progress-track" id="progress-track" aria-hidden="true">
@@ -270,9 +289,15 @@ const activeLayerSwatch = getElement<HTMLSpanElement>("active-layer-swatch");
 const activeLayerName = getElement<HTMLSpanElement>("active-layer-name");
 const maskCount = getElement<HTMLSpanElement>("mask-count");
 const addMaskButton = getElement<HTMLButtonElement>("add-mask");
+const newMaskClass = getElement<HTMLSelectElement>("new-mask-class");
+const addMaskConfirm = getElement<HTMLButtonElement>("add-mask-confirm");
+const maskLayerClass = getElement<HTMLSelectElement>("mask-layer-class");
 const maskLayerName = getElement<HTMLInputElement>("mask-layer-name");
 const maskLayerColor = getElement<HTMLInputElement>("mask-layer-color");
+const newClassButton = getElement<HTMLButtonElement>("new-class");
+const archiveClassButton = getElement<HTMLButtonElement>("archive-class");
 const deleteMaskButton = getElement<HTMLButtonElement>("delete-mask");
+const preventMaskOverlap = getElement<HTMLInputElement>("prevent-mask-overlap");
 const positiveTool = getElement<HTMLButtonElement>("positive-tool");
 const negativeTool = getElement<HTMLButtonElement>("negative-tool");
 const markerTool = getElement<HTMLButtonElement>("marker-tool");
@@ -299,6 +324,19 @@ const encodeMetric = getElement<HTMLElement>("encode-metric");
 const decodeMetric = getElement<HTMLElement>("decode-metric");
 const brushCursor = getElement<HTMLDivElement>("brush-cursor");
 const interactionHint = getElement<HTMLParagraphElement>("interaction-hint");
+const saveAnnotationsButton = getElement<HTMLButtonElement>("save-annotations");
+const saveStatus = getElement<HTMLSpanElement>("save-status");
+
+interface Category { id: number; name: string; supercategory: string; color: string; active: boolean }
+interface SavedDraftLayer { layerId: string; annotationId: number; categoryId: number; rawMask: string; effectiveMask: string }
+interface SavedDraft {
+  imageId: string;
+  width?: number;
+  height?: number;
+  layers: SavedDraftLayer[];
+  latestMaskLayerId: string | null;
+  preventOverlap: boolean;
+}
 
 let dataRoot: DataFolder | null = null;
 let currentFolder: DataFolder | null = null;
@@ -309,6 +347,14 @@ let activeTool: ActiveTool = "positive";
 let markerDiameter = 20;
 let eraserDiameter = 32;
 const maskLayers = new MaskLayerCollection();
+let categories: Category[] = [{ id: 1, name: "object", supercategory: "phytolith", color: "#4094dc", active: true }];
+let preventOverlap = false;
+let dirty = false;
+let annotationRevision = 0;
+let saving = false;
+let lastSaveError: string | null = null;
+let saveTimer = 0;
+const snapshotResolvers = new Map<string, (message: Extract<WorkerToMainMessage, { type: "annotation-snapshot" }>) => void>();
 let nextStrokeId = 0;
 let activeStroke: {
   pointerId: number;
@@ -366,7 +412,7 @@ if (
 
   const offscreen = overlay.transferControlToOffscreen();
   postWorker({ type: "initialize", canvas: offscreen }, [offscreen]);
-  void refreshData();
+  void initializeProject();
 
   function postWorker(
     message: MainToWorkerMessage,
@@ -421,6 +467,7 @@ if (
         setStageSize(message.width, message.height);
         imageReady = true;
         renderMaskPicker();
+        updateSaveState();
         imageStage.classList.remove("disabled");
         stageMessage.classList.add("hidden");
         encodeMetric.textContent = message.cacheHit
@@ -460,6 +507,13 @@ if (
         return;
       }
 
+      case "annotation-snapshot": {
+        if (message.imageRevision !== imageRevision) return;
+        snapshotResolvers.get(message.requestId)?.(message);
+        snapshotResolvers.delete(message.requestId);
+        return;
+      }
+
       case "error": {
         if (
           message.imageRevision !== undefined &&
@@ -472,8 +526,10 @@ if (
     }
   }
 
-  function loadActiveImage(): void {
+  async function loadActiveImage(): Promise<void> {
     if (!modelReady || !activeImage) return;
+    const revision = imageRevision;
+    const image = activeImage;
     imageReady = false;
     renderMaskPicker();
     imageStage.classList.add("disabled");
@@ -482,15 +538,153 @@ if (
       "Encoding this image once",
       "The cached embeddings make every point prompt much faster.",
     );
+    let draft: SavedDraft;
+    try {
+      const response = await fetch(`/api/images/${encodeURIComponent(image.id)}/annotations`, { cache: "no-store" });
+      if (!response.ok) throw await responseErrorFromFetch(response);
+      draft = await response.json() as SavedDraft;
+    } catch (error) {
+      showFatal(error instanceof Error ? error.message : String(error), "Unable to load annotations");
+      return;
+    }
+    if (revision !== imageRevision || activeImage?.id !== image.id) return;
+    applyDraft(draft);
     postWorker({
       type: "load-image",
-      imageRevision,
-      imageId: activeImage.id,
-      url: activeImage.url,
+      imageRevision: revision,
+      imageId: image.id,
+      url: image.url,
       layers: maskLayers.all().map(({ id, color, visible }) => ({ id, color, visible })),
       activeLayerId: maskLayers.active().id,
+      preventOverlap,
+      restoredMasks: draft.layers.map((layer) => ({ layerId: layer.layerId, mask: base64ToBytes(layer.rawMask) })),
+      latestMaskLayerId: draft.latestMaskLayerId ?? undefined,
     });
   }
+
+  async function initializeProject(): Promise<void> {
+    try {
+      await refreshClasses();
+      await refreshData();
+    } catch (error) {
+      showFatal(error instanceof Error ? error.message : String(error), "Unable to initialize annotations");
+    }
+  }
+
+  async function refreshClasses(): Promise<void> {
+    const response = await fetch("/api/classes", { cache: "no-store" });
+    if (!response.ok) throw await responseErrorFromFetch(response);
+    const document = await response.json() as { categories: Category[] };
+    categories = document.categories;
+    renderMaskPicker();
+  }
+
+  function applyDraft(draft: SavedDraft): void {
+    preventOverlap = draft.preventOverlap;
+    if (draft.layers.length > 0) {
+      maskLayers.replace(draft.layers.map((layer) => {
+        const category = categoryById(layer.categoryId);
+        return {
+          id: layer.layerId,
+          annotationId: layer.annotationId,
+          categoryId: layer.categoryId,
+          name: category?.name ?? `Unknown class ${layer.categoryId}`,
+          color: category?.color ?? "#8a8a8a",
+        };
+      }));
+    } else {
+      const category = activeCategories()[0] ?? categories[0] ?? defaultCategory();
+      maskLayers.reset(category.id, category.name, category.color);
+    }
+    dirty = false;
+    annotationRevision = 0;
+    updateSaveState();
+    renderMaskPicker();
+  }
+
+  async function saveAnnotations(): Promise<boolean> {
+    if (!activeImage || !imageReady || saving) return !dirty;
+    saving = true;
+    lastSaveError = null;
+    updateSaveState();
+    const requestId = crypto.randomUUID?.() ?? `save-${Date.now()}`;
+    const revision = imageRevision;
+    const savedAnnotationRevision = annotationRevision;
+    let snapshotTimeout = 0;
+    const snapshot = new Promise<Extract<WorkerToMainMessage, { type: "annotation-snapshot" }>>((resolve, reject) => {
+      snapshotResolvers.set(requestId, (message) => {
+        window.clearTimeout(snapshotTimeout);
+        resolve(message);
+      });
+      snapshotTimeout = window.setTimeout(() => {
+        snapshotResolvers.delete(requestId);
+        reject(new Error("The mask worker did not finish the save snapshot."));
+      }, 15000);
+    });
+    postWorker({ type: "snapshot-annotations", requestId, imageRevision: revision });
+    try {
+      const result = await snapshot;
+      if (revision !== imageRevision || !activeImage) return false;
+      const response = await fetch(`/api/images/${encodeURIComponent(activeImage.id)}/annotations`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          width: result.width,
+          height: result.height,
+          latestMaskLayerId: result.latestMaskLayerId || null,
+          preventOverlap,
+          layers: result.layers.map((mask) => ({
+            layerId: mask.layerId,
+            categoryId: maskLayers.get(mask.layerId)?.categoryId,
+            rawMask: bytesToBase64(mask.rawMask),
+            effectiveMask: bytesToBase64(mask.effectiveMask),
+          })),
+        }),
+      });
+      if (!response.ok) throw await responseErrorFromFetch(response);
+      dirty = annotationRevision !== savedAnnotationRevision;
+      lastSaveError = null;
+      return true;
+    } catch (error) {
+      lastSaveError = error instanceof Error ? error.message : "Unknown save error";
+      return false;
+    } finally {
+      saving = false;
+      updateSaveState();
+      if (dirty && !lastSaveError) {
+        window.clearTimeout(saveTimer);
+        saveTimer = window.setTimeout(() => void saveAnnotations(), 400);
+      }
+    }
+  }
+
+  function markDirty(): void {
+    dirty = true;
+    annotationRevision += 1;
+    updateSaveState();
+    window.clearTimeout(saveTimer);
+    saveTimer = window.setTimeout(() => void saveAnnotations(), 1200);
+  }
+
+  function updateSaveState(): void {
+    saveAnnotationsButton.disabled = !activeImage || !imageReady || saving || !dirty;
+    if (saving) saveStatus.textContent = "Saving…";
+    else if (lastSaveError) saveStatus.textContent = `Save failed: ${lastSaveError}`;
+    else if (dirty) saveStatus.textContent = "Unsaved";
+    else saveStatus.textContent = "Saved";
+  }
+
+  saveAnnotationsButton.addEventListener("click", () => void saveAnnotations());
+  window.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      void saveAnnotations();
+    }
+  });
+  window.addEventListener("beforeunload", (event) => {
+    if (!dirty) return;
+    event.preventDefault();
+  });
 
   function submitPrompts(points: PointPrompt[], preview = false): void {
     const layer = maskLayers.active();
@@ -596,6 +790,7 @@ if (
     renderMarkers();
     updatePointControls();
     submitPrompts(layer.pinnedPoints);
+    markDirty();
   });
 
   function queuePointer(clientX: number, clientY: number): void {
@@ -627,6 +822,7 @@ if (
     postBrush("end", activeStroke.strokeId, [normalizeEventPoint(event)]);
     imageStage.releasePointerCapture?.(event.pointerId);
     activeStroke = null;
+    markDirty();
   }
 
   function postBrush(
@@ -718,6 +914,11 @@ if (
     folder: DataFolder,
     preferredImagePath?: string,
   ): void {
+    void selectFolderAfterSave(folder, preferredImagePath);
+  }
+
+  async function selectFolderAfterSave(folder: DataFolder, preferredImagePath?: string): Promise<void> {
+    if (dirty && !(await saveAnnotations())) return;
     currentFolder = folder;
     expandAncestors(folder.path);
     const image =
@@ -734,7 +935,15 @@ if (
   }
 
   function selectImage(image: DataImage): void {
+    void selectImageAfterSave(image);
+  }
+
+  async function selectImageAfterSave(image: DataImage): Promise<void> {
     if (activeImage?.path === image.path) {
+      renderDataBrowser();
+      return;
+    }
+    if (dirty && !(await saveAnnotations())) {
       renderDataBrowser();
       return;
     }
@@ -774,6 +983,9 @@ if (
     imageStage.style.height = "420px";
     imageStage.style.aspectRatio = "auto";
     imageStage.classList.add("disabled");
+    dirty = false;
+    annotationRevision = 0;
+    updateSaveState();
     renderMarkers();
     updatePointControls();
     postWorker({
@@ -886,12 +1098,19 @@ if (
   maskPickerTrigger.addEventListener("click", () => setMaskPickerOpen(maskPickerMenu.hidden));
   addMaskButton.addEventListener("click", () => {
     if (!imageReady) return;
+    setMaskPickerOpen(true);
+    newMaskClass.focus();
+  });
+  addMaskConfirm.addEventListener("click", () => {
+    if (!imageReady) return;
+    const category = categoryById(Number(newMaskClass.value));
+    if (!category) return;
     cancelTransientInteraction();
-    const layer = maskLayers.add();
+    const layer = maskLayers.add(category.id, category.name, category.color);
     postWorker({ type: "create-layer", imageRevision, layer: descriptor(layer) });
     postWorker({ type: "activate-layer", imageRevision, layerId: layer.id });
     refreshActiveLayerUi();
-    setMaskPickerOpen(true);
+    markDirty();
   });
   maskLayerList.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
@@ -914,15 +1133,30 @@ if (
     postWorker({ type: "activate-layer", imageRevision, layerId: layer.id });
     refreshActiveLayerUi();
   });
-  maskLayerName.addEventListener("change", () => {
-    try { maskLayers.rename(maskLayers.active().id, maskLayerName.value); } catch { /* Restore below. */ }
-    renderMaskPicker();
-  });
-  maskLayerColor.addEventListener("input", () => {
+  maskLayerClass.addEventListener("change", () => {
+    const category = categoryById(Number(maskLayerClass.value));
+    if (!category) return;
     const layer = maskLayers.active();
-    maskLayers.setColor(layer.id, maskLayerColor.value);
-    postWorker({ type: "update-layer", imageRevision, layerId: layer.id, color: layer.color });
+    maskLayers.setCategory(layer.id, category.id, category.name, category.color);
+    postWorker({ type: "update-layer", imageRevision, layerId: layer.id, color: category.color });
     renderMaskPicker();
+    markDirty();
+  });
+  maskLayerName.addEventListener("change", () => {
+    void updateCategory(maskLayers.active().categoryId, { name: maskLayerName.value });
+  });
+  maskLayerColor.addEventListener("change", () => {
+    void updateCategory(maskLayers.active().categoryId, { color: maskLayerColor.value });
+  });
+  newClassButton.addEventListener("click", () => {
+    const name = window.prompt("New class name");
+    if (name?.trim()) void addCategory(name.trim());
+  });
+  archiveClassButton.addEventListener("click", () => {
+    const category = categoryById(maskLayers.active().categoryId);
+    if (category && window.confirm(`Remove “${category.name}” from new mask choices? Existing masks will keep it.`)) {
+      void archiveCategory(category.id);
+    }
   });
   deleteMaskButton.addEventListener("click", () => {
     if (maskLayers.all().length === 1) return;
@@ -932,7 +1166,53 @@ if (
     postWorker({ type: "delete-layer", imageRevision, layerId: deletedId });
     postWorker({ type: "activate-layer", imageRevision, layerId: active.id });
     refreshActiveLayerUi();
+    markDirty();
   });
+  preventMaskOverlap.addEventListener("change", () => {
+    preventOverlap = preventMaskOverlap.checked;
+    postWorker({
+      type: "set-overlap-prevention",
+      imageRevision,
+      enabled: preventOverlap,
+      activeLayerId: maskLayers.active().id,
+    });
+    markDirty();
+  });
+
+  async function addCategory(name: string): Promise<void> {
+    const response = await fetch("/api/classes", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, supercategory: "phytolith" }),
+    });
+    if (!response.ok) { window.alert((await responseErrorFromFetch(response)).message); return; }
+    const category = await response.json() as Category;
+    categories.push(category);
+    renderMaskPicker();
+    newMaskClass.value = String(category.id);
+  }
+
+  async function updateCategory(id: number, changes: Partial<Category>): Promise<void> {
+    const response = await fetch(`/api/classes/${id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(changes),
+    });
+    if (!response.ok) { window.alert((await responseErrorFromFetch(response)).message); renderMaskPicker(); return; }
+    const updated = await response.json() as Category;
+    categories = categories.map((item) => item.id === id ? updated : item);
+    for (const layer of maskLayers.all()) {
+      if (layer.categoryId !== id) continue;
+      maskLayers.setCategory(layer.id, id, updated.name, updated.color);
+      postWorker({ type: "update-layer", imageRevision, layerId: layer.id, color: updated.color });
+    }
+    renderMaskPicker();
+  }
+
+  async function archiveCategory(id: number): Promise<void> {
+    const response = await fetch(`/api/classes/${id}`, { method: "DELETE" });
+    if (!response.ok) { window.alert((await responseErrorFromFetch(response)).message); return; }
+    const archived = await response.json() as Category;
+    categories = categories.map((item) => item.id === id ? archived : item);
+    renderMaskPicker();
+  }
 
   function cancelTransientInteraction(): void {
     const layer = maskLayers.active();
@@ -999,27 +1279,34 @@ if (
     if (!layer.editState.hasMask || !layer.visible) return;
     layer.editRevision += 1;
     postWorker({ type: "invert-mask", imageRevision, layerId: layer.id, editRevision: layer.editRevision });
+    markDirty();
   });
   undoEditButton.addEventListener("click", () => {
     const layer = maskLayers.active();
     if (!layer.editState.canUndo || !layer.visible) return;
     layer.editRevision += 1;
     postWorker({ type: "undo-edit", imageRevision, layerId: layer.id, editRevision: layer.editRevision });
+    markDirty();
   });
   resetEditsButton.addEventListener("click", () => {
     const layer = maskLayers.active();
     if (!layer.editState.hasEdits || !layer.visible) return;
     layer.editRevision += 1;
     postWorker({ type: "reset-edits", imageRevision, layerId: layer.id, editRevision: layer.editRevision });
+    markDirty();
   });
 
   undoButton.addEventListener("click", () => {
     const layer = maskLayers.active();
     layer.pinnedPoints = removeLastPoint(layer.pinnedPoints);
+    hoverPoint = null;
+    latestPointer = null;
+    removeHoverMarker();
     layer.lastPromptKey = null;
     renderMarkers();
     updatePointControls();
-    submitPrompts(composePrompts(layer.pinnedPoints, hoverPoint), hoverPoint !== null);
+    submitPrompts(layer.pinnedPoints);
+    markDirty();
   });
 
   clearButton.addEventListener("click", () => {
@@ -1031,6 +1318,7 @@ if (
     renderMarkers();
     updatePointControls();
     submitPrompts([]);
+    markDirty();
   });
 }
 
@@ -1143,7 +1431,8 @@ function updateEditingControls(): void {
 
 function resetMaskUiState(): void {
   activeStroke = null;
-  maskLayers.reset();
+  const category = activeCategories()[0] ?? categories[0] ?? defaultCategory();
+  maskLayers.reset(category.id, category.name, category.color);
   hideBrushCursor();
   if (isBrushTool(activeTool)) setTool("positive");
   renderMaskPicker();
@@ -1156,14 +1445,28 @@ function descriptor(layer: MaskLayer): { id: string; color: string; visible: boo
 
 function renderMaskPicker(): void {
   const active = maskLayers.active();
+  const activeCategory = categoryById(active.categoryId);
   const count = maskLayers.all().length;
   activeLayerSwatch.style.background = active.color;
-  activeLayerName.textContent = active.name;
+  activeLayerName.textContent = layerDisplayName(active);
   activeLayerName.classList.toggle("hidden-mask", !active.visible);
   maskCount.textContent = `${count} mask${count === 1 ? "" : "s"}`;
-  maskLayerName.value = active.name;
-  maskLayerColor.value = active.color;
+  maskLayerName.value = activeCategory?.name ?? active.name;
+  maskLayerColor.value = activeCategory?.color ?? active.color;
+  newMaskClass.replaceChildren();
+  for (const category of activeCategories()) newMaskClass.append(new Option(category.name, String(category.id)));
+  if (activeCategories().some((category) => category.id === active.categoryId)) {
+    newMaskClass.value = String(active.categoryId);
+  }
+  maskLayerClass.replaceChildren();
+  for (const category of categories.filter((item) => item.active || item.id === active.categoryId)) {
+    maskLayerClass.append(new Option(`${category.name}${category.active ? "" : " (removed)"}`, String(category.id)));
+  }
+  maskLayerClass.value = String(active.categoryId);
+  addMaskConfirm.disabled = !imageReady || activeCategories().length === 0;
+  archiveClassButton.disabled = !activeCategory?.active;
   deleteMaskButton.disabled = count === 1;
+  preventMaskOverlap.checked = preventOverlap;
   addMaskButton.disabled = !imageReady;
   maskLayerList.replaceChildren();
   for (const layer of maskLayers.all()) {
@@ -1189,11 +1492,52 @@ function renderMaskPicker(): void {
     swatch.className = "layer-swatch";
     swatch.style.background = layer.color;
     const name = document.createElement("span");
-    name.textContent = layer.name;
+    name.textContent = layerDisplayName(layer);
     select.append(swatch, name);
     row.append(eye, select);
     maskLayerList.append(row);
   }
+}
+
+function categoryById(id: number): Category | undefined {
+  return categories.find((category) => category.id === id);
+}
+
+function layerDisplayName(layer: MaskLayer): string {
+  const sameClass = maskLayers.all().filter((item) => item.categoryId === layer.categoryId);
+  return `${layer.name} · ${sameClass.indexOf(layer) + 1}`;
+}
+
+function activeCategories(): Category[] {
+  return categories.filter((category) => category.active);
+}
+
+function defaultCategory(): Category {
+  return { id: 1, name: "object", supercategory: "phytolith", color: "#4094dc", active: true };
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  const output = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) output[index] = binary.charCodeAt(index);
+  return output;
+}
+
+function bytesToBase64(value: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let offset = 0; offset < value.length; offset += chunk) {
+    binary += String.fromCharCode(...value.subarray(offset, offset + chunk));
+  }
+  return btoa(binary);
+}
+
+async function responseErrorFromFetch(response: Response): Promise<Error> {
+  try {
+    const body = await response.json() as { detail?: string };
+    if (body.detail) return new Error(body.detail);
+  } catch { /* Use status fallback. */ }
+  return new Error(`Request failed with HTTP ${response.status}.`);
 }
 
 function setMaskPickerOpen(open: boolean): void {
