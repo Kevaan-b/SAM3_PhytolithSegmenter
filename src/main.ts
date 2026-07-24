@@ -40,177 +40,76 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         </span>
         <span>Samotator</span>
       </a>
-      <div class="model-pill">
-        <span class="model-dot"></span>
-        SAM3 Q4 · H100 CUDA
+      <div class="header-controls">
+        <div class="model-pill"><span class="model-dot"></span>SAM3 Q4 · H100 CUDA</div>
+        <div class="status-chip loading" id="status-chip" role="status" aria-live="polite"><span class="status-light"></span><span id="status-label">Connecting to H100…</span></div>
+        <div class="save-controls"><button class="autosave-button" id="autosave-toggle" type="button" aria-pressed="true" title="Autosave is on">Auto</button><button id="save-annotations" type="button" disabled>Saved</button></div>
       </div>
     </header>
 
     <main class="workspace">
       <aside class="control-panel">
-        <div class="eyebrow">Interactive segmentation</div>
-        <h1>Point. Refine.<br /><em>Reveal.</em></h1>
-        <p class="lede">
-          Move across an image to preview a segment. Pin points to shape the
-          mask—the image stays on your machine.
-        </p>
-
-        <section class="control-section">
-          <div class="section-heading">
-            <span>01</span>
-            <h2>Browse data</h2>
-          </div>
-          <div class="data-browser">
-            <nav class="folder-crumbs" id="folder-crumbs" aria-label="Data folder path"></nav>
-            <span class="browser-label" id="folder-tree-label">Folder</span>
-            <div class="folder-tree-picker" id="folder-tree-picker">
-              <button
-                class="folder-tree-trigger"
-                id="folder-tree-trigger"
-                type="button"
-                aria-labelledby="folder-tree-label folder-tree-value"
-                aria-haspopup="tree"
-                aria-expanded="false"
-                disabled
-              >
-                <span id="folder-tree-value">Scanning data/…</span>
-                <span aria-hidden="true">⌄</span>
-              </button>
-              <div class="folder-tree-menu" id="folder-tree-menu" hidden>
-                <div class="folder-tree" id="folder-tree" role="tree"></div>
-              </div>
-            </div>
-            <label class="browser-label" for="image-select">Image</label>
-            <select class="browser-select" id="image-select" disabled>
-              <option>No images</option>
-            </select>
-            <div class="browser-navigation">
-              <button class="nav-button" id="previous-button" type="button" disabled>
-                ← Previous
-              </button>
-              <div class="navigation-toggle" role="group" aria-label="Previous and next target">
-                <button class="active" id="navigate-folders" type="button" aria-pressed="true">
-                  Folders
-                </button>
-                <button id="navigate-images" type="button" aria-pressed="false">
-                  Images
-                </button>
-              </div>
-              <button class="nav-button" id="next-button" type="button" disabled>
-                Next →
-              </button>
-            </div>
-            <button class="refresh-button" id="refresh-data" type="button">
-              ↻ Rescan data folder
-            </button>
-            <p class="data-summary" id="data-summary">Looking for images under data/…</p>
-          </div>
-        </section>
-
-        <section class="control-section masks-section">
-          <div class="section-heading">
-            <span>02</span>
-            <h2>Masks</h2>
-          </div>
-          <div class="mask-picker" id="mask-picker">
-            <div class="mask-picker-toolbar">
-              <button class="mask-picker-trigger" id="mask-picker-trigger" type="button" aria-expanded="false" aria-haspopup="dialog">
-                <span class="layer-swatch" id="active-layer-swatch"></span>
-                <span class="active-layer-name" id="active-layer-name">Mask 1</span>
-                <span class="mask-count" id="mask-count">1 mask</span>
-                <span aria-hidden="true">⌄</span>
-              </button>
-              <button class="add-mask-button" id="add-mask" type="button" aria-label="Add mask layer">+</button>
-            </div>
-            <div class="mask-picker-menu" id="mask-picker-menu" hidden>
-              <div class="new-instance-row">
-                <select id="new-mask-class" aria-label="Class for new mask"></select>
-                <button id="add-mask-confirm" type="button">Add instance</button>
-              </div>
-              <div class="mask-layer-list" id="mask-layer-list" role="listbox" aria-label="Mask layers"></div>
-              <div class="mask-layer-editor">
-                <label for="mask-layer-class">Class</label>
-                <select id="mask-layer-class"></select>
-                <label for="mask-layer-name">Name</label>
-                <input id="mask-layer-name" maxlength="80" />
-                <label for="mask-layer-color">Color</label>
-                <input id="mask-layer-color" type="color" />
-                <button class="new-class-button" id="new-class" type="button">New class</button>
-                <button class="archive-class-button" id="archive-class" type="button">Remove class</button>
-                <button class="delete-mask-button" id="delete-mask" type="button">Delete mask</button>
-              </div>
-              <label class="overlap-toggle" for="prevent-mask-overlap">
-                <span>
-                  <strong>Prevent overlaps</strong>
-                  <small>Clip the latest mask against all others</small>
-                </span>
-                <input id="prevent-mask-overlap" type="checkbox" />
-              </label>
-            </div>
-          </div>
-        </section>
-
-        <section class="control-section">
-          <div class="section-heading">
-            <span>03</span>
-            <h2>Set point type</h2>
-          </div>
-          <div class="tool-switch" role="group" aria-label="Point type">
-            <button class="tool-button active" id="positive-tool" type="button" aria-pressed="true">
-              <span class="tool-icon positive">+</span>
-              Positive
-            </button>
-            <button class="tool-button" id="negative-tool" type="button" aria-pressed="false">
-              <span class="tool-icon negative">−</span>
-              Negative
-            </button>
-          </div>
-          <p class="tool-hint" id="tool-hint">
-            Positive points include a region.
-          </p>
-        </section>
-
-        <div class="point-actions">
-          <button class="text-button" id="undo-button" type="button" disabled>
-            <span aria-hidden="true">↶</span> Undo
-          </button>
-          <button class="text-button" id="clear-button" type="button" disabled>
-            <span aria-hidden="true">×</span> Clear all
-          </button>
-          <span class="point-count" id="point-count">0 pinned</span>
+        <div class="sidebar-tabs" role="tablist" aria-label="Workspace controls">
+          <button class="sidebar-tab" id="setup-tab" type="button" role="tab" aria-controls="setup-panel" aria-selected="false" tabindex="-1">Setup</button>
+          <button class="sidebar-tab active" id="masking-tab" type="button" role="tab" aria-controls="masking-panel" aria-selected="true">Masking</button>
         </div>
 
-        <section class="control-section mask-edit-section">
-          <div class="section-heading">
-            <span>04</span>
-            <h2>Refine mask</h2>
-          </div>
-          <div class="tool-switch" role="group" aria-label="Mask brush">
-            <button class="tool-button" id="marker-tool" type="button" aria-pressed="false" disabled>
-              <span class="tool-icon marker-icon">●</span>
-              Marker
-            </button>
-            <button class="tool-button" id="eraser-tool" type="button" aria-pressed="false" disabled>
-              <span class="tool-icon eraser-icon">○</span>
-              Eraser
-            </button>
-          </div>
-          <div class="brush-controls">
-            <label for="marker-size">
-              <span>Marker size</span><output id="marker-size-value">20 px</output>
-            </label>
-            <input id="marker-size" type="range" min="2" max="200" step="2" value="20" />
-            <label for="eraser-size">
-              <span>Eraser size</span><output id="eraser-size-value">32 px</output>
-            </label>
-            <input id="eraser-size" type="range" min="2" max="200" step="2" value="32" />
-          </div>
-          <div class="mask-actions">
-            <button class="text-button" id="invert-mask" type="button" aria-pressed="false" disabled>◐ Invert mask</button>
-            <button class="text-button" id="undo-edit" type="button" disabled>↶ Undo edit</button>
-            <button class="text-button" id="reset-edits" type="button" disabled>× Reset edits</button>
-          </div>
-        </section>
+        <div class="sidebar-panel" id="setup-panel" role="tabpanel" aria-labelledby="setup-tab" hidden>
+          <section class="control-section data-section">
+            <div class="section-heading"><span>01</span><h2>Browse data</h2></div>
+            <div class="data-browser">
+              <nav class="folder-crumbs" id="folder-crumbs" aria-label="Data folder path"></nav>
+              <span class="browser-label" id="folder-tree-label">Folder</span>
+              <div class="folder-tree-picker" id="folder-tree-picker">
+                <button class="folder-tree-trigger" id="folder-tree-trigger" type="button" aria-labelledby="folder-tree-label folder-tree-value" aria-haspopup="tree" aria-expanded="false" disabled><span id="folder-tree-value">Scanning data/…</span><span aria-hidden="true">⌄</span></button>
+                <div class="folder-tree-menu" id="folder-tree-menu" hidden><div class="folder-tree" id="folder-tree" role="tree"></div></div>
+              </div>
+              <button class="nav-button next-folder-button" id="next-folder-button" type="button" disabled>Next folder →</button>
+              <button class="refresh-button" id="refresh-data" type="button">↻ Rescan data folder</button>
+              <p class="data-summary" id="data-summary">Looking for images under data/…</p>
+            </div>
+          </section>
+
+          <section class="control-section class-setup-section">
+            <div class="section-heading"><span>02</span><h2>Class definitions</h2></div>
+            <p class="panel-hint">Names and colors apply everywhere this class is used.</p>
+            <div class="class-list setup-class-list" id="setup-class-list" role="listbox" aria-label="Class definitions"></div>
+            <div class="mask-layer-editor class-definition-editor">
+              <label for="mask-layer-name">Name</label><input id="mask-layer-name" maxlength="80" />
+              <label for="mask-layer-color">Color</label><input id="mask-layer-color" type="color" />
+              <button class="archive-class-button" id="archive-class" type="button">Remove class</button>
+            </div>
+            <form class="new-class-form" id="new-class-form">
+              <label for="new-class-name">Add class</label><input id="new-class-name" maxlength="80" placeholder="Class name" /><button id="new-class" type="submit">Add</button>
+            </form>
+          </section>
+        </div>
+
+        <div class="sidebar-panel" id="masking-panel" role="tabpanel" aria-labelledby="masking-tab">
+          <section class="control-section image-navigation-section">
+            <div class="section-heading"><span>01</span><h2>Image</h2></div>
+            <label class="browser-label" for="image-select">Current image</label>
+            <select class="browser-select" id="image-select" disabled><option>No images</option></select>
+            <div class="image-navigation">
+              <button class="nav-button" id="previous-image-button" type="button" disabled>← Previous image</button>
+              <button class="nav-button" id="next-image-button" type="button" disabled>Next image →</button>
+            </div>
+          </section>
+          <section class="control-section masking-class-section">
+            <div class="section-heading"><span>02</span><h2>Class</h2></div>
+            <p class="panel-hint">Choose the class for the active mask and the next new mask.</p>
+            <div class="class-list" id="new-mask-class" role="listbox" aria-label="Mask class"></div>
+          </section>
+          <section class="control-section masks-section">
+            <div class="section-heading"><span>03</span><h2>Masks</h2><span class="mask-count" id="mask-count">1 mask</span></div>
+            <div class="mask-picker" id="mask-picker">
+              <div class="mask-picker-toolbar"><button class="add-mask-button" id="add-mask" type="button">+ New mask</button></div>
+              <div class="mask-layer-list" id="mask-layer-list" role="listbox" aria-label="Mask layers"></div>
+              <div class="mask-actions"><button class="text-button danger" id="delete-mask" type="button">Delete mask</button></div>
+              <label class="overlap-toggle" for="prevent-mask-overlap"><span><strong>Prevent overlaps</strong><small>Clip the latest mask against all others</small></span><input id="prevent-mask-overlap" type="checkbox" /></label>
+            </div>
+          </section>
+        </div>
       </aside>
 
       <section class="viewer-panel" aria-label="Interactive segmentation viewer">
@@ -218,14 +117,6 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <div>
             <div class="eyebrow">Live canvas</div>
             <h2 id="viewer-title">No image selected</h2>
-          </div>
-          <div class="status-chip loading" id="status-chip" role="status" aria-live="polite">
-            <span class="status-light"></span>
-            <span id="status-label">Connecting to H100…</span>
-          </div>
-          <div class="save-controls">
-            <span id="save-status">Saved</span>
-            <button id="save-annotations" type="button" disabled>Save</button>
           </div>
         </div>
 
@@ -259,6 +150,21 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           </dl>
         </div>
       </section>
+
+      <aside class="refine-panel" aria-label="Point and mask refinement controls">
+        <section class="control-section point-type-section">
+          <div class="section-heading"><span>01</span><h2>Point type</h2></div>
+          <div class="tool-switch" role="group" aria-label="Point type"><button class="tool-button active" id="positive-tool" type="button" aria-pressed="true"><span class="tool-icon positive">+</span>Positive</button><button class="tool-button" id="negative-tool" type="button" aria-pressed="false"><span class="tool-icon negative">−</span>Negative</button></div>
+          <p class="tool-hint" id="tool-hint">Positive points include a region.</p>
+        </section>
+        <div class="point-actions"><button class="text-button" id="undo-button" type="button" disabled><span aria-hidden="true">↶</span> Undo</button><button class="text-button" id="clear-button" type="button" disabled><span aria-hidden="true">×</span> Clear all</button><span class="point-count" id="point-count">0 pinned</span></div>
+        <section class="control-section mask-edit-section">
+          <div class="section-heading"><span>02</span><h2>Refine mask</h2></div>
+          <div class="tool-switch" role="group" aria-label="Mask brush"><button class="tool-button" id="marker-tool" type="button" aria-pressed="false" disabled><span class="tool-icon marker-icon">●</span>Marker</button><button class="tool-button" id="eraser-tool" type="button" aria-pressed="false" disabled><span class="tool-icon eraser-icon">○</span>Eraser</button></div>
+          <div class="brush-controls"><label for="marker-size"><span>Marker size</span><output id="marker-size-value">20 px</output></label><input id="marker-size" type="range" min="2" max="200" step="2" value="20" /><label for="eraser-size"><span>Eraser size</span><output id="eraser-size-value">32 px</output></label><input id="eraser-size" type="range" min="2" max="200" step="2" value="32" /></div>
+          <div class="mask-actions"><button class="text-button" id="invert-mask" type="button" aria-pressed="false" disabled>◐ Invert mask</button><button class="text-button" id="undo-edit" type="button" disabled>↶ Undo edit</button><button class="text-button" id="reset-edits" type="button" disabled>× Reset edits</button></div>
+        </section>
+      </aside>
     </main>
   </div>
 `;
@@ -271,30 +177,28 @@ const folderTreeValue = getElement<HTMLSpanElement>("folder-tree-value");
 const folderTreeMenu = getElement<HTMLDivElement>("folder-tree-menu");
 const folderTree = getElement<HTMLDivElement>("folder-tree");
 const imageSelect = getElement<HTMLSelectElement>("image-select");
-const previousButton = getElement<HTMLButtonElement>("previous-button");
-const nextButton = getElement<HTMLButtonElement>("next-button");
+const nextFolderButton = getElement<HTMLButtonElement>("next-folder-button");
+const previousImageButton = getElement<HTMLButtonElement>("previous-image-button");
+const nextImageButton = getElement<HTMLButtonElement>("next-image-button");
 const refreshDataButton = getElement<HTMLButtonElement>("refresh-data");
-const navigateFolders = getElement<HTMLButtonElement>("navigate-folders");
-const navigateImages = getElement<HTMLButtonElement>("navigate-images");
 const dataSummary = getElement<HTMLParagraphElement>("data-summary");
 const imageStage = getElement<HTMLDivElement>("image-stage");
 const sourceImage = getElement<HTMLImageElement>("source-image");
 const overlay = getElement<HTMLCanvasElement>("mask-overlay");
 const markerLayer = getElement<HTMLDivElement>("marker-layer");
-const maskPicker = getElement<HTMLDivElement>("mask-picker");
-const maskPickerTrigger = getElement<HTMLButtonElement>("mask-picker-trigger");
-const maskPickerMenu = getElement<HTMLDivElement>("mask-picker-menu");
+const setupTab = getElement<HTMLButtonElement>("setup-tab");
+const maskingTab = getElement<HTMLButtonElement>("masking-tab");
+const setupPanel = getElement<HTMLDivElement>("setup-panel");
+const maskingPanel = getElement<HTMLDivElement>("masking-panel");
+const setupClassList = getElement<HTMLDivElement>("setup-class-list");
 const maskLayerList = getElement<HTMLDivElement>("mask-layer-list");
-const activeLayerSwatch = getElement<HTMLSpanElement>("active-layer-swatch");
-const activeLayerName = getElement<HTMLSpanElement>("active-layer-name");
 const maskCount = getElement<HTMLSpanElement>("mask-count");
 const addMaskButton = getElement<HTMLButtonElement>("add-mask");
-const newMaskClass = getElement<HTMLSelectElement>("new-mask-class");
-const addMaskConfirm = getElement<HTMLButtonElement>("add-mask-confirm");
-const maskLayerClass = getElement<HTMLSelectElement>("mask-layer-class");
+const newMaskClass = getElement<HTMLDivElement>("new-mask-class");
+const newClassForm = getElement<HTMLFormElement>("new-class-form");
+const newClassName = getElement<HTMLInputElement>("new-class-name");
 const maskLayerName = getElement<HTMLInputElement>("mask-layer-name");
 const maskLayerColor = getElement<HTMLInputElement>("mask-layer-color");
-const newClassButton = getElement<HTMLButtonElement>("new-class");
 const archiveClassButton = getElement<HTMLButtonElement>("archive-class");
 const deleteMaskButton = getElement<HTMLButtonElement>("delete-mask");
 const preventMaskOverlap = getElement<HTMLInputElement>("prevent-mask-overlap");
@@ -325,7 +229,7 @@ const decodeMetric = getElement<HTMLElement>("decode-metric");
 const brushCursor = getElement<HTMLDivElement>("brush-cursor");
 const interactionHint = getElement<HTMLParagraphElement>("interaction-hint");
 const saveAnnotationsButton = getElement<HTMLButtonElement>("save-annotations");
-const saveStatus = getElement<HTMLSpanElement>("save-status");
+const autosaveToggle = getElement<HTMLButtonElement>("autosave-toggle");
 
 interface Category { id: number; name: string; supercategory: string; color: string; active: boolean }
 interface SavedDraftLayer { layerId: string; annotationId: number; categoryId: number; rawMask: string; effectiveMask: string }
@@ -348,12 +252,15 @@ let markerDiameter = 20;
 let eraserDiameter = 32;
 const maskLayers = new MaskLayerCollection();
 let categories: Category[] = [{ id: 1, name: "object", supercategory: "phytolith", color: "#4094dc", active: true }];
+let selectedClassId = 1;
+let activeSidebarTab: "setup" | "masking" = "masking";
 let preventOverlap = false;
 let dirty = false;
 let annotationRevision = 0;
 let saving = false;
 let lastSaveError: string | null = null;
 let saveTimer = 0;
+let autosaveEnabled = true;
 const snapshotResolvers = new Map<string, (message: Extract<WorkerToMainMessage, { type: "annotation-snapshot" }>) => void>();
 let nextStrokeId = 0;
 let activeStroke: {
@@ -386,6 +293,7 @@ renderDataBrowser();
 renderMaskPicker();
 updatePointControls();
 updateEditingControls();
+setSidebarTab(activeSidebarTab);
 
 if (
   !("Worker" in window) ||
@@ -473,7 +381,7 @@ if (
         encodeMetric.textContent = message.cacheHit
           ? `cache hit · ${formatDuration(message.encodeMs)}`
           : formatDuration(message.encodeMs);
-        setStatus("ready", "Ready · hover to segment");
+        setStatus("ready", "Ready");
         return;
       }
 
@@ -485,7 +393,7 @@ if (
           return;
         }
         decodeMetric.textContent = `${formatDuration(message.decodeMs)} · GPU ${formatDuration(message.serverDecodeMs)}`;
-        setStatus("ready", "Ready · hover to segment");
+        setStatus("ready", "Ready");
         return;
       }
 
@@ -651,7 +559,7 @@ if (
     } finally {
       saving = false;
       updateSaveState();
-      if (dirty && !lastSaveError) {
+      if (autosaveEnabled && dirty && !lastSaveError) {
         window.clearTimeout(saveTimer);
         saveTimer = window.setTimeout(() => void saveAnnotations(), 400);
       }
@@ -662,19 +570,35 @@ if (
     dirty = true;
     annotationRevision += 1;
     updateSaveState();
-    window.clearTimeout(saveTimer);
-    saveTimer = window.setTimeout(() => void saveAnnotations(), 1200);
+    if (autosaveEnabled) {
+      window.clearTimeout(saveTimer);
+      saveTimer = window.setTimeout(() => void saveAnnotations(), 1200);
+    }
   }
 
   function updateSaveState(): void {
     saveAnnotationsButton.disabled = !activeImage || !imageReady || saving || !dirty;
-    if (saving) saveStatus.textContent = "Saving…";
-    else if (lastSaveError) saveStatus.textContent = `Save failed: ${lastSaveError}`;
-    else if (dirty) saveStatus.textContent = "Unsaved";
-    else saveStatus.textContent = "Saved";
+    saveAnnotationsButton.textContent = saving
+      ? "Saving…"
+      : lastSaveError
+        ? "Save failed"
+        : dirty
+          ? "Save"
+          : "Saved";
+    autosaveToggle.disabled = !activeImage || !imageReady;
+    autosaveToggle.setAttribute("aria-pressed", String(autosaveEnabled));
+    autosaveToggle.title = autosaveEnabled ? "Autosave is on" : "Autosave is off";
   }
 
   saveAnnotationsButton.addEventListener("click", () => void saveAnnotations());
+  autosaveToggle.addEventListener("click", () => {
+    autosaveEnabled = !autosaveEnabled;
+    window.clearTimeout(saveTimer);
+    if (autosaveEnabled && dirty && !saving && !lastSaveError) {
+      saveTimer = window.setTimeout(() => void saveAnnotations(), 400);
+    }
+    updateSaveState();
+  });
   window.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
       event.preventDefault();
@@ -1053,14 +977,18 @@ if (
     if (image) selectImage(image);
   });
 
-  navigateFolders.addEventListener("click", () => {
-    setNavigationMode("folder");
+  nextFolderButton.addEventListener("click", () => {
+    navigationMode = "folder";
+    moveSelection(1);
   });
-  navigateImages.addEventListener("click", () => {
-    setNavigationMode("image");
+  previousImageButton.addEventListener("click", () => {
+    navigationMode = "image";
+    moveSelection(-1);
   });
-  previousButton.addEventListener("click", () => moveSelection(-1));
-  nextButton.addEventListener("click", () => moveSelection(1));
+  nextImageButton.addEventListener("click", () => {
+    navigationMode = "image";
+    moveSelection(1);
+  });
   refreshDataButton.addEventListener("click", () => void refreshData());
 
   folderCrumbs.addEventListener("click", (event) => {
@@ -1083,34 +1011,44 @@ if (
     ) {
       setFolderTreeOpen(false);
     }
-    if (!maskPickerMenu.hidden && !maskPicker.contains(event.target as Node)) {
-      setMaskPickerOpen(false);
-    }
   });
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      setFolderTreeOpen(false);
-      setMaskPickerOpen(false);
-    }
+    if (event.key === "Escape") setFolderTreeOpen(false);
   });
 
-  maskPickerTrigger.addEventListener("click", () => setMaskPickerOpen(maskPickerMenu.hidden));
+  setupTab.addEventListener("click", () => setSidebarTab("setup"));
+  maskingTab.addEventListener("click", () => setSidebarTab("masking"));
+  [setupTab, maskingTab].forEach((tab) => tab.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    setSidebarTab(tab === setupTab ? "masking" : "setup");
+    (tab === setupTab ? maskingTab : setupTab).focus();
+  }));
+  setupClassList.addEventListener("click", (event) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-class-id]");
+    if (!button) return;
+    selectedClassId = Number(button.dataset.classId);
+    renderMaskPicker();
+  });
+
   addMaskButton.addEventListener("click", () => {
     if (!imageReady) return;
-    setMaskPickerOpen(true);
-    newMaskClass.focus();
-  });
-  addMaskConfirm.addEventListener("click", () => {
-    if (!imageReady) return;
-    const category = categoryById(Number(newMaskClass.value));
+    const category = categoryById(Number(newMaskClass.dataset.selected));
     if (!category) return;
-    cancelTransientInteraction();
-    const layer = maskLayers.add(category.id, category.name, category.color);
-    postWorker({ type: "create-layer", imageRevision, layer: descriptor(layer) });
-    postWorker({ type: "activate-layer", imageRevision, layerId: layer.id });
-    refreshActiveLayerUi();
-    markDirty();
+    addMaskForCategory(category);
+  });
+  newMaskClass.addEventListener("click", (event) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-class-id]");
+    if (!button) return;
+    const category = categoryById(Number(button.dataset.classId));
+    if (!category) return;
+    setActiveLayerCategory(category);
+  });
+  newClassForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const name = newClassName.value.trim();
+    if (name) { newClassName.value = ""; void addCategory(name); }
   });
   maskLayerList.addEventListener("click", (event) => {
     const target = event.target as HTMLElement;
@@ -1133,27 +1071,14 @@ if (
     postWorker({ type: "activate-layer", imageRevision, layerId: layer.id });
     refreshActiveLayerUi();
   });
-  maskLayerClass.addEventListener("change", () => {
-    const category = categoryById(Number(maskLayerClass.value));
-    if (!category) return;
-    const layer = maskLayers.active();
-    maskLayers.setCategory(layer.id, category.id, category.name, category.color);
-    postWorker({ type: "update-layer", imageRevision, layerId: layer.id, color: category.color });
-    renderMaskPicker();
-    markDirty();
-  });
   maskLayerName.addEventListener("change", () => {
-    void updateCategory(maskLayers.active().categoryId, { name: maskLayerName.value });
+    void updateCategory(selectedClassId, { name: maskLayerName.value });
   });
   maskLayerColor.addEventListener("change", () => {
-    void updateCategory(maskLayers.active().categoryId, { color: maskLayerColor.value });
-  });
-  newClassButton.addEventListener("click", () => {
-    const name = window.prompt("New class name");
-    if (name?.trim()) void addCategory(name.trim());
+    void updateCategory(selectedClassId, { color: maskLayerColor.value });
   });
   archiveClassButton.addEventListener("click", () => {
-    const category = categoryById(maskLayers.active().categoryId);
+    const category = categoryById(selectedClassId);
     if (category && window.confirm(`Remove “${category.name}” from new mask choices? Existing masks will keep it.`)) {
       void archiveCategory(category.id);
     }
@@ -1187,8 +1112,8 @@ if (
     if (!response.ok) { window.alert((await responseErrorFromFetch(response)).message); return; }
     const category = await response.json() as Category;
     categories.push(category);
+    selectedClassId = category.id;
     renderMaskPicker();
-    newMaskClass.value = String(category.id);
   }
 
   async function updateCategory(id: number, changes: Partial<Category>): Promise<void> {
@@ -1320,6 +1245,37 @@ if (
     submitPrompts([]);
     markDirty();
   });
+
+  function addMaskForCategory(category: Category): void {
+    cancelTransientInteraction();
+    const layer = maskLayers.add(category.id, category.name, category.color);
+    postWorker({ type: "create-layer", imageRevision, layer: descriptor(layer) });
+    postWorker({ type: "activate-layer", imageRevision, layerId: layer.id });
+    refreshActiveLayerUi();
+    markDirty();
+  }
+
+  function setActiveLayerCategory(category: Category): void {
+    selectedClassId = category.id;
+    const layer = maskLayers.active();
+    maskLayers.setCategory(layer.id, category.id, category.name, category.color);
+    postWorker({ type: "update-layer", imageRevision, layerId: layer.id, color: category.color });
+    renderMaskPicker();
+    markDirty();
+  }
+}
+
+function setSidebarTab(tab: "setup" | "masking"): void {
+  activeSidebarTab = tab;
+  const isSetup = tab === "setup";
+  setupTab.classList.toggle("active", isSetup);
+  maskingTab.classList.toggle("active", !isSetup);
+  setupTab.setAttribute("aria-selected", String(isSetup));
+  maskingTab.setAttribute("aria-selected", String(!isSetup));
+  setupTab.tabIndex = isSetup ? 0 : -1;
+  maskingTab.tabIndex = isSetup ? -1 : 0;
+  setupPanel.hidden = !isSetup;
+  maskingPanel.hidden = isSetup;
 }
 
 function setTool(tool: ActiveTool): void {
@@ -1447,24 +1403,19 @@ function renderMaskPicker(): void {
   const active = maskLayers.active();
   const activeCategory = categoryById(active.categoryId);
   const count = maskLayers.all().length;
-  activeLayerSwatch.style.background = active.color;
-  activeLayerName.textContent = layerDisplayName(active);
-  activeLayerName.classList.toggle("hidden-mask", !active.visible);
   maskCount.textContent = `${count} mask${count === 1 ? "" : "s"}`;
-  maskLayerName.value = activeCategory?.name ?? active.name;
-  maskLayerColor.value = activeCategory?.color ?? active.color;
-  newMaskClass.replaceChildren();
-  for (const category of activeCategories()) newMaskClass.append(new Option(category.name, String(category.id)));
-  if (activeCategories().some((category) => category.id === active.categoryId)) {
-    newMaskClass.value = String(active.categoryId);
-  }
-  maskLayerClass.replaceChildren();
-  for (const category of categories.filter((item) => item.active || item.id === active.categoryId)) {
-    maskLayerClass.append(new Option(`${category.name}${category.active ? "" : " (removed)"}`, String(category.id)));
-  }
-  maskLayerClass.value = String(active.categoryId);
-  addMaskConfirm.disabled = !imageReady || activeCategories().length === 0;
-  archiveClassButton.disabled = !activeCategory?.active;
+  const selectedCategory = categoryById(selectedClassId) ?? activeCategory ?? defaultCategory();
+  selectedClassId = selectedCategory.id;
+  maskLayerName.value = selectedCategory.name;
+  maskLayerColor.value = selectedCategory.color;
+  renderClassList(newMaskClass, activeCategories(), active.categoryId);
+  newMaskClass.dataset.selected = String(active.categoryId);
+  renderClassList(
+    setupClassList,
+    categories.filter((category) => category.active || category.id === selectedClassId),
+    selectedClassId,
+  );
+  archiveClassButton.disabled = !selectedCategory.active;
   deleteMaskButton.disabled = count === 1;
   preventMaskOverlap.checked = preventOverlap;
   addMaskButton.disabled = !imageReady;
@@ -1496,6 +1447,30 @@ function renderMaskPicker(): void {
     select.append(swatch, name);
     row.append(eye, select);
     maskLayerList.append(row);
+  }
+}
+
+function renderClassList(
+  target: HTMLDivElement,
+  values: Category[],
+  selectedId: number,
+): void {
+  target.replaceChildren();
+  for (const category of values) {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = "class-option";
+    option.dataset.classId = String(category.id);
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", String(category.id === selectedId));
+    option.setAttribute("aria-label", category.name + (category.active ? "" : " (removed)"));
+    const swatch = document.createElement("span");
+    swatch.className = "layer-swatch";
+    swatch.style.background = category.color;
+    const name = document.createElement("span");
+    name.textContent = category.name + (category.active ? "" : " (removed)");
+    option.append(swatch, name);
+    target.append(option);
   }
 }
 
@@ -1540,13 +1515,6 @@ async function responseErrorFromFetch(response: Response): Promise<Error> {
   return new Error(`Request failed with HTTP ${response.status}.`);
 }
 
-function setMaskPickerOpen(open: boolean): void {
-  maskPickerMenu.hidden = !open;
-  maskPickerTrigger.setAttribute("aria-expanded", String(open));
-  maskPicker.classList.toggle("open", open);
-  if (open) renderMaskPicker();
-}
-
 function renderDataBrowser(): void {
   imageSelect.replaceChildren();
   folderCrumbs.replaceChildren();
@@ -1558,10 +1526,9 @@ function renderDataBrowser(): void {
     setFolderTreeOpen(false);
     imageSelect.append(new Option("No images", ""));
     imageSelect.disabled = true;
-    previousButton.disabled = true;
-    nextButton.disabled = true;
-    navigateFolders.disabled = true;
-    navigateImages.disabled = true;
+    nextFolderButton.disabled = true;
+    previousImageButton.disabled = true;
+    nextImageButton.disabled = true;
     return;
   }
 
@@ -1598,31 +1565,9 @@ function renderDataBrowser(): void {
     folderCrumbs.append(button);
   });
 
-  const previous =
-    navigationMode === "folder"
-      ? adjacentFolder(dataRoot, currentFolder, -1)
-      : adjacentImage(currentFolder, activeImage, -1);
-  const next =
-    navigationMode === "folder"
-      ? adjacentFolder(dataRoot, currentFolder, 1)
-      : adjacentImage(currentFolder, activeImage, 1);
-  previousButton.disabled = !previous;
-  nextButton.disabled = !next;
-  navigateFolders.disabled = false;
-  navigateImages.disabled = !activeImage;
-  navigateFolders.classList.toggle(
-    "active",
-    navigationMode === "folder",
-  );
-  navigateFolders.setAttribute(
-    "aria-pressed",
-    String(navigationMode === "folder"),
-  );
-  navigateImages.classList.toggle("active", navigationMode === "image");
-  navigateImages.setAttribute(
-    "aria-pressed",
-    String(navigationMode === "image"),
-  );
+  nextFolderButton.disabled = !adjacentFolder(dataRoot, currentFolder, 1);
+  previousImageButton.disabled = !adjacentImage(currentFolder, activeImage, -1);
+  nextImageButton.disabled = !adjacentImage(currentFolder, activeImage, 1);
 }
 
 function renderFolderTree(): void {

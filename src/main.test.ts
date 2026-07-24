@@ -163,8 +163,18 @@ describe("browser UI with a mocked inference worker", () => {
       imageId: "train-a",
       url: "/data/train/train-a.png",
     });
+    const setupTab = document.querySelector<HTMLButtonElement>("#setup-tab")!;
+    const maskingTab = document.querySelector<HTMLButtonElement>("#masking-tab")!;
+    const setupPanel = document.querySelector<HTMLDivElement>("#setup-panel")!;
+    const maskingPanel = document.querySelector<HTMLDivElement>("#masking-panel")!;
+    expect(maskingTab.getAttribute("aria-selected")).toBe("true");
+    expect(maskingPanel.hidden).toBe(false);
+    expect(setupPanel.hidden).toBe(true);
+    setupTab.click();
+    expect(setupPanel.hidden).toBe(false);
+    expect(maskingPanel.hidden).toBe(true);
 
-    document.querySelector<HTMLButtonElement>("#next-button")!.click();
+    document.querySelector<HTMLButtonElement>("#next-folder-button")!.click();
     await Promise.resolve();
     await Promise.resolve();
     expect(
@@ -177,7 +187,11 @@ describe("browser UI with a mocked inference worker", () => {
       type: "load-image",
       url: "/data/val/val-a.png",
     });
+    expect(setupPanel.hidden).toBe(false);
+    maskingTab.click();
+    expect(maskingPanel.hidden).toBe(false);
 
+    setupTab.click();
     document.querySelector<HTMLButtonElement>("#folder-tree-trigger")!.click();
     const treeMenu =
       document.querySelector<HTMLDivElement>("#folder-tree-menu")!;
@@ -191,6 +205,7 @@ describe("browser UI with a mocked inference worker", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(treeMenu.hidden).toBe(true);
+    maskingTab.click();
 
     const imageSelect =
       document.querySelector<HTMLSelectElement>("#image-select")!;
@@ -199,20 +214,10 @@ describe("browser UI with a mocked inference worker", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(
-      document.querySelector<HTMLButtonElement>("#navigate-folders")
-        ?.getAttribute("aria-pressed"),
-    ).toBe("true");
-
-    document.querySelector<HTMLButtonElement>("#navigate-images")!.click();
-    expect(
-      document.querySelector<HTMLButtonElement>("#navigate-images")
-        ?.getAttribute("aria-pressed"),
-    ).toBe("true");
-    expect(
-      document.querySelector<HTMLButtonElement>("#next-button")?.disabled,
+      document.querySelector<HTMLButtonElement>("#next-image-button")?.disabled,
     ).toBe(true);
 
-    document.querySelector<HTMLButtonElement>("#previous-button")!.click();
+    document.querySelector<HTMLButtonElement>("#previous-image-button")!.click();
     await Promise.resolve();
     await Promise.resolve();
     expect(imageSelect.value).toBe("train/train-a.png");
@@ -284,14 +289,20 @@ describe("browser UI with a mocked inference worker", () => {
       type: "decode",
       points: [{ x: 0.5, y: 0.5, label: 0 }],
     });
-    document.querySelector<HTMLButtonElement>("#save-annotations")!.click();
+    const saveButton = document.querySelector<HTMLButtonElement>("#save-annotations")!;
+    const autosaveButton = document.querySelector<HTMLButtonElement>("#autosave-toggle")!;
+    expect(saveButton.textContent).toBe("Save");
+    expect(autosaveButton.getAttribute("aria-pressed")).toBe("true");
+    autosaveButton.click();
+    expect(autosaveButton.getAttribute("aria-pressed")).toBe("false");
+    saveButton.click();
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
     expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
       String(url).includes("/annotations") && init?.method === "PUT"
     )).toBe(true);
-    expect(document.querySelector("#save-status")?.textContent).toBe("Saved");
+    expect(saveButton.textContent).toBe("Saved");
 
     document.querySelector<HTMLButtonElement>("#undo-button")!.click();
     expect(document.querySelector("#point-count")?.textContent).toBe(
@@ -420,7 +431,6 @@ describe("browser UI with a mocked inference worker", () => {
     stage.dispatchEvent(pointerEvent("pointerup", 10, 110, 70));
 
     document.querySelector<HTMLButtonElement>("#add-mask")!.click();
-    document.querySelector<HTMLButtonElement>("#add-mask-confirm")!.click();
     const created = [...worker.messages].reverse().find(
       (message) => message.type === "create-layer",
     );
@@ -452,7 +462,9 @@ describe("browser UI with a mocked inference worker", () => {
     name.dispatchEvent(new Event("change", { bubbles: true }));
     await Promise.resolve();
     await Promise.resolve();
-    expect(document.querySelector("#active-layer-name")?.textContent).toBe("Class A · 2");
+    expect(
+      document.querySelector(".mask-layer-row.active .layer-select span:last-child")?.textContent,
+    ).toBe("Class A · 2");
     const color = document.querySelector<HTMLInputElement>("#mask-layer-color")!;
     color.value = "#112233";
     color.dispatchEvent(new Event("change", { bubbles: true }));
