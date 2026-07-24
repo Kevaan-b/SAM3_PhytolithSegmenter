@@ -3,3 +3,10 @@ dist/
 .vite/
 *.log
 .samotator-cache/
+.DS_Store
+__pycache__/
+*.pyc
+data/.samotator/
+
+__pycache__/
+*.pyc
