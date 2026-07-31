@@ -100,6 +100,24 @@ def classes():
         raise HTTPException(status_code=500, detail=str(error)) from error
 
 
+@app.get("/api/statistics")
+def annotation_statistics():
+    try:
+        return annotations.statistics()
+    except ValueError as error:
+        raise HTTPException(status_code=500, detail=str(error)) from error
+
+
+@app.get("/api/statistics/previews/{image_id}")
+def annotation_preview(image_id: str, category_id: int | None = None):
+    try:
+        return Response(annotations.preview_image(image_id, category_id), media_type="image/png")
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="Image not found.") from error
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
 @app.post("/api/classes")
 def add_class(request: CategoryCreate):
     try:

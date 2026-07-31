@@ -1464,7 +1464,7 @@ button:focus-visible {
 /* Two-tab annotation sidebar */
 .sidebar-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 4px;
   margin-bottom: 14px;
   padding: 3px;
@@ -1676,4 +1676,82 @@ button:focus-visible {
   color: white;
   background: #1d2420;
   border-color: #1d2420;
+}
+
+
+.statistics-total {
+  margin: 12px 0 8px;
+  padding: 12px;
+  color: var(--ink);
+  background: rgba(37, 182, 107, 0.11);
+  border: 1px solid rgba(37, 182, 107, 0.22);
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.statistics-list {
+  display: grid;
+  max-height: min(360px, calc(100vh - 260px));
+  gap: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 3px;
+  scrollbar-gutter: stable;
+}
+.statistics-row {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  color: #566159;
+  background: rgba(255, 255, 255, 0.32);
+  border: 1px solid rgba(29, 36, 32, 0.09);
+  border-radius: 4px;
+  font-size: 10px;
+}
+.statistics-row:hover { background: #eef2ec; }
+.statistics-row[aria-selected="true"] {
+  color: var(--ink);
+  background: #eef7f0;
+  border-color: rgba(37, 182, 107, .32);
+  box-shadow: inset 2px 0 var(--green);
+  font-weight: 600;
+}
+.statistics-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.statistics-count { color: #7c867f; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+
+.statistics-viewer { min-height: 360px; }
+.statistics-viewer-hint { margin: 0 0 12px; color: #7e8881; font-size: 10px; }
+.statistics-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+.statistics-preview-card {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.42);
+  border: 1px solid rgba(29, 36, 32, 0.13);
+  border-radius: 5px;
+}
+.statistics-preview-card img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  background: #d4dbd3;
+}
+.statistics-preview-card figcaption {
+  padding: 7px 8px;
+  overflow: hidden;
+  color: #5b665e;
+  font-size: 9px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

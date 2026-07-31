@@ -120,6 +120,17 @@ describe("browser UI with a mocked inference worker", () => {
       let body: unknown = DATA_TREE;
       if (url === "/api/classes" && (!init?.method || init.method === "GET")) {
         body = { schema_version: 1, next_category_id: 2, categories: [category] };
+      } else if (url === "/api/statistics") {
+        body = {
+          totalAnnotations: 3,
+          classes: [{ ...category, annotationCount: 3 }],
+          previews: Array.from({ length: 10 }, (_, index) => ({
+            imageId: "train-" + index,
+            fileName: "train/train-" + index + ".png",
+            annotationCount: 3,
+            categoryIds: [1],
+          })),
+        };
       } else if (/\/api\/classes\/1$/.test(url) && init?.method === "PATCH") {
         category = { ...category, ...JSON.parse(String(init.body)) };
         body = category;
@@ -165,11 +176,20 @@ describe("browser UI with a mocked inference worker", () => {
     });
     const setupTab = document.querySelector<HTMLButtonElement>("#setup-tab")!;
     const maskingTab = document.querySelector<HTMLButtonElement>("#masking-tab")!;
+    const statisticsTab = document.querySelector<HTMLButtonElement>("#statistics-tab")!;
+    const statisticsPanel = document.querySelector<HTMLDivElement>("#statistics-panel")!;
     const setupPanel = document.querySelector<HTMLDivElement>("#setup-panel")!;
     const maskingPanel = document.querySelector<HTMLDivElement>("#masking-panel")!;
     expect(maskingTab.getAttribute("aria-selected")).toBe("true");
     expect(maskingPanel.hidden).toBe(false);
     expect(setupPanel.hidden).toBe(true);
+    statisticsTab.click();
+    await vi.waitFor(() => {
+      expect(statisticsPanel.hidden).toBe(false);
+      expect(document.querySelector("#statistics-total")?.textContent).toBe("3 saved annotations");
+      expect(document.querySelector(".statistics-row strong")?.textContent).toBe("object");
+      expect(document.querySelectorAll(".statistics-preview-card")).toHaveLength(8);
+    });
     setupTab.click();
     expect(setupPanel.hidden).toBe(false);
     expect(maskingPanel.hidden).toBe(true);

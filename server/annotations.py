@@ -5,6 +5,7 @@ import json
 import os
 import threading
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Callable
 
@@ -32,6 +33,69 @@ class AnnotationStore:
     def categories(self) -> dict:
         with self.lock:
             return self._read_categories()
+
+    def statistics(self) -> dict:
+        """Return saved COCO instance counts for every defined category."""
+        with self.lock:
+            document = self._read_categories()
+            counts = {int(category["id"]): 0 for category in document["categories"]}
+            for path in sorted(self.output_root.glob("instances*.json")):
+                output = self._read_json(path)
+                for annotation in output.get("annotations", []):
+                    identifier = int(annotation.get("category_id", 0))
+                    if identifier in counts:
+                        counts[identifier] += 1
+            previews = []
+            for draft in sorted(self._drafts(), key=lambda item: item.get("savedAt", ""), reverse=True):
+                width, height = int(draft["width"]), int(draft["height"])
+                category_ids = sorted({
+                    int(layer["categoryId"])
+                    for layer in draft["layers"]
+                    if self._mask_area(layer["effectiveMask"], width, height) > 0
+                })
+                annotation_count = len(category_ids)
+                if annotation_count:
+                    previews.append({
+                        "imageId": draft["imageId"],
+                        "fileName": draft["file_name"],
+                        "annotationCount": annotation_count,
+                        "categoryIds": category_ids,
+                    })
+            return {
+                "totalAnnotations": sum(counts.values()),
+                "classes": [
+                    {**category, "annotationCount": counts[int(category["id"])]}
+                    for category in document["categories"]
+                ],
+                "previews": previews[:12],
+            }
+
+    def preview_image(self, image_id: str, category_id: int | None = None) -> bytes:
+        record = self.get_record(image_id)
+        with self.lock:
+            draft = self.load_image(image_id)
+            if not draft["layers"]:
+                raise ValueError("No saved annotations exist for this image.")
+            width, height = int(draft["width"]), int(draft["height"])
+            categories = {int(category["id"]): category for category in self._read_categories()["categories"]}
+            with Image.open(record.absolute_path) as source:
+                image = source.convert("RGBA")
+            for layer in draft["layers"]:
+                if category_id is not None and int(layer["categoryId"]) != category_id:
+                    continue
+                mask = self._unpack(layer["effectiveMask"], width, height)
+                if not mask.any():
+                    continue
+                color = categories.get(int(layer["categoryId"]), {}).get("color", "#8a8a8a")
+                rgb = tuple(int(color[index:index + 2], 16) for index in (1, 3, 5))
+                alpha = Image.fromarray(mask.astype(np.uint8) * 120, mode="L")
+                overlay = Image.new("RGBA", image.size, (*rgb, 0))
+                overlay.putalpha(alpha)
+                image = Image.alpha_composite(image, overlay)
+            image.thumbnail((760, 760))
+            output = BytesIO()
+            image.save(output, format="PNG")
+            return output.getvalue()
 
     def add_category(self, name: str, supercategory: str = "phytolith", color: str | None = None) -> dict:
         with self.lock:

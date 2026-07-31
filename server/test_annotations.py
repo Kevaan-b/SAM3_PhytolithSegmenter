@@ -62,6 +62,25 @@ def test_save_round_trip_and_coco_mask_derivatives(tmp_path: Path):
     assert np.flatnonzero(decoded.reshape(-1)).tolist() == [6, 7, 12]
 
 
+def test_statistics_counts_saved_annotations_by_class(tmp_path: Path):
+    store, _ = fixture(tmp_path)
+    second = store.add_category("cross")
+    mask = packed(5, 4, [0])
+    store.save_image(
+        "image-a", 5, 4,
+        [
+            {"layerId": "object", "categoryId": 1, "rawMask": mask, "effectiveMask": mask},
+            {"layerId": "cross", "categoryId": second["id"], "rawMask": mask, "effectiveMask": mask},
+        ],
+        "cross", False,
+    )
+    statistics = store.statistics()
+    assert statistics["totalAnnotations"] == 2
+    assert [item["annotationCount"] for item in statistics["classes"]] == [1, 1]
+    assert statistics["previews"] == [{"imageId": "image-a", "fileName": "train/sample.png", "annotationCount": 2, "categoryIds": [1, 2]}]
+    assert store.preview_image("image-a").startswith(b"\x89PNG")
+
+
 def test_empty_layers_are_drafts_but_not_coco_annotations(tmp_path: Path):
     store, _ = fixture(tmp_path)
     empty = packed(5, 4, [])

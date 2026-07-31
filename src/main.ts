@@ -52,6 +52,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <div class="sidebar-tabs" role="tablist" aria-label="Workspace controls">
           <button class="sidebar-tab" id="setup-tab" type="button" role="tab" aria-controls="setup-panel" aria-selected="false" tabindex="-1">Setup</button>
           <button class="sidebar-tab active" id="masking-tab" type="button" role="tab" aria-controls="masking-panel" aria-selected="true">Masking</button>
+          <button class="sidebar-tab" id="statistics-tab" type="button" role="tab" aria-controls="statistics-panel" aria-selected="false" tabindex="-1">Statistics</button>
         </div>
 
         <div class="sidebar-panel" id="setup-panel" role="tabpanel" aria-labelledby="setup-tab" hidden>
@@ -110,6 +111,15 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
             </div>
           </section>
         </div>
+
+        <div class="sidebar-panel statistics-panel" id="statistics-panel" role="tabpanel" aria-labelledby="statistics-tab" hidden>
+          <section class="control-section">
+            <div class="section-heading"><span>01</span><h2>Annotation statistics</h2></div>
+            <p class="panel-hint">Saved instances across the annotations folder. Refreshes whenever you open this tab.</p>
+            <div class="statistics-total" id="statistics-total" aria-live="polite">Loading saved annotations…</div>
+            <div class="statistics-list" id="statistics-list" aria-live="polite"></div>
+          </section>
+        </div>
       </aside>
 
       <section class="viewer-panel" aria-label="Interactive segmentation viewer">
@@ -118,6 +128,11 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
             <div class="eyebrow">Live canvas</div>
             <h2 id="viewer-title">No image selected</h2>
           </div>
+        </div>
+
+        <div class="statistics-viewer" id="statistics-viewer" hidden>
+          <p class="statistics-viewer-hint">Saved masks are shown as color overlays.</p>
+          <div class="statistics-preview-grid" id="statistics-preview-grid"></div>
         </div>
 
         <div class="progress-track" id="progress-track" aria-hidden="true">
@@ -142,7 +157,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <div class="corner-guide bottom-right"></div>
         </div>
 
-        <div class="viewer-footer">
+        <div class="viewer-footer" id="viewer-footer">
           <p id="interaction-hint"><span class="cursor-symbol">⌖</span> Hover to preview · Click to pin</p>
           <dl class="metrics">
             <div><dt>Encoder</dt><dd id="encode-metric">—</dd></div>
@@ -188,8 +203,12 @@ const overlay = getElement<HTMLCanvasElement>("mask-overlay");
 const markerLayer = getElement<HTMLDivElement>("marker-layer");
 const setupTab = getElement<HTMLButtonElement>("setup-tab");
 const maskingTab = getElement<HTMLButtonElement>("masking-tab");
+const statisticsTab = getElement<HTMLButtonElement>("statistics-tab");
 const setupPanel = getElement<HTMLDivElement>("setup-panel");
 const maskingPanel = getElement<HTMLDivElement>("masking-panel");
+const statisticsPanel = getElement<HTMLDivElement>("statistics-panel");
+const statisticsTotal = getElement<HTMLDivElement>("statistics-total");
+const statisticsList = getElement<HTMLDivElement>("statistics-list");
 const setupClassList = getElement<HTMLDivElement>("setup-class-list");
 const maskLayerList = getElement<HTMLDivElement>("mask-layer-list");
 const maskCount = getElement<HTMLSpanElement>("mask-count");
@@ -218,6 +237,9 @@ const undoButton = getElement<HTMLButtonElement>("undo-button");
 const clearButton = getElement<HTMLButtonElement>("clear-button");
 const pointCount = getElement<HTMLSpanElement>("point-count");
 const viewerTitle = getElement<HTMLHeadingElement>("viewer-title");
+const statisticsViewer = getElement<HTMLDivElement>("statistics-viewer");
+const statisticsPreviewGrid = getElement<HTMLDivElement>("statistics-preview-grid");
+const viewerFooter = getElement<HTMLElement>("viewer-footer");
 const statusChip = getElement<HTMLDivElement>("status-chip");
 const statusLabel = getElement<HTMLSpanElement>("status-label");
 const progressTrack = getElement<HTMLDivElement>("progress-track");
@@ -232,6 +254,19 @@ const saveAnnotationsButton = getElement<HTMLButtonElement>("save-annotations");
 const autosaveToggle = getElement<HTMLButtonElement>("autosave-toggle");
 
 interface Category { id: number; name: string; supercategory: string; color: string; active: boolean }
+interface StatisticsPreview {
+  imageId: string;
+  fileName: string;
+  annotationCount: number;
+  categoryIds: number[];
+}
+
+interface ClassStatistics {
+  totalAnnotations: number;
+  classes: Array<Category & { annotationCount: number }>;
+  previews: StatisticsPreview[];
+}
+
 interface SavedDraftLayer { layerId: string; annotationId: number; categoryId: number; rawMask: string; effectiveMask: string }
 interface SavedDraft {
   imageId: string;
@@ -253,7 +288,11 @@ let eraserDiameter = 32;
 const maskLayers = new MaskLayerCollection();
 let categories: Category[] = [{ id: 1, name: "object", supercategory: "phytolith", color: "#4094dc", active: true }];
 let selectedClassId = 1;
-let activeSidebarTab: "setup" | "masking" = "masking";
+let classUsageTick = 0;
+const classLastUsed = new Map<number, number>();
+let activeSidebarTab: "setup" | "masking" | "statistics" = "masking";
+let statisticsSnapshot: ClassStatistics | null = null;
+let selectedStatisticsClassId: number | null = null;
 let preventOverlap = false;
 let dirty = false;
 let annotationRevision = 0;
@@ -1017,19 +1056,34 @@ if (
     if (event.key === "Escape") setFolderTreeOpen(false);
   });
 
+  const sidebarTabs = [setupTab, maskingTab, statisticsTab];
+  const sidebarTabNames: Array<"setup" | "masking" | "statistics"> = ["setup", "masking", "statistics"];
   setupTab.addEventListener("click", () => setSidebarTab("setup"));
   maskingTab.addEventListener("click", () => setSidebarTab("masking"));
-  [setupTab, maskingTab].forEach((tab) => tab.addEventListener("keydown", (event) => {
+  statisticsTab.addEventListener("click", () => setSidebarTab("statistics"));
+  sidebarTabs.forEach((tab, index) => tab.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
-    setSidebarTab(tab === setupTab ? "masking" : "setup");
-    (tab === setupTab ? maskingTab : setupTab).focus();
+    const direction = event.key === "ArrowRight" ? 1 : -1;
+    const nextIndex = (index + direction + sidebarTabs.length) % sidebarTabs.length;
+    const nextTab = sidebarTabs[nextIndex];
+    const nextName = sidebarTabNames[nextIndex];
+    if (!nextTab || !nextName) return;
+    setSidebarTab(nextName);
+    nextTab.focus();
   }));
   setupClassList.addEventListener("click", (event) => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-class-id]");
     if (!button) return;
     selectedClassId = Number(button.dataset.classId);
     renderMaskPicker();
+  });
+  statisticsList.addEventListener("click", (event) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-statistics-class]");
+    if (!button || !statisticsSnapshot) return;
+    selectedStatisticsClassId = Number(button.dataset.statisticsClass);
+    renderStatisticsRows(statisticsSnapshot.classes);
+    renderStatisticsPreviews(statisticsSnapshot.previews, selectedStatisticsClassId);
   });
 
   addMaskButton.addEventListener("click", () => {
@@ -1068,6 +1122,7 @@ if (
     if (!row) return;
     cancelTransientInteraction();
     const layer = maskLayers.select(row.dataset.layerSelect!);
+    touchClass(layer.categoryId);
     postWorker({ type: "activate-layer", imageRevision, layerId: layer.id });
     refreshActiveLayerUi();
   });
@@ -1112,6 +1167,7 @@ if (
     if (!response.ok) { window.alert((await responseErrorFromFetch(response)).message); return; }
     const category = await response.json() as Category;
     categories.push(category);
+    touchClass(category.id);
     selectedClassId = category.id;
     renderMaskPicker();
   }
@@ -1247,6 +1303,7 @@ if (
   });
 
   function addMaskForCategory(category: Category): void {
+    touchClass(category.id);
     cancelTransientInteraction();
     const layer = maskLayers.add(category.id, category.name, category.color);
     postWorker({ type: "create-layer", imageRevision, layer: descriptor(layer) });
@@ -1256,6 +1313,7 @@ if (
   }
 
   function setActiveLayerCategory(category: Category): void {
+    touchClass(category.id);
     selectedClassId = category.id;
     const layer = maskLayers.active();
     maskLayers.setCategory(layer.id, category.id, category.name, category.color);
@@ -1265,17 +1323,99 @@ if (
   }
 }
 
-function setSidebarTab(tab: "setup" | "masking"): void {
+function renderStatisticsRows(classes: Array<Category & { annotationCount: number }>): void {
+  statisticsList.replaceChildren();
+  for (const category of classes) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "statistics-row";
+    row.dataset.statisticsClass = String(category.id);
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(category.id === selectedStatisticsClassId));
+    const swatch = document.createElement("span");
+    swatch.className = "layer-swatch";
+    swatch.style.background = category.color;
+    const name = document.createElement("strong");
+    name.textContent = category.name;
+    const count = document.createElement("span");
+    count.className = "statistics-count";
+    count.textContent = String(category.annotationCount) + " " + (category.annotationCount === 1 ? "annotation" : "annotations");
+    row.append(swatch, name, count);
+    statisticsList.append(row);
+  }
+  if (classes.length === 0) statisticsList.textContent = "No classes have been defined yet.";
+}
+
+function renderStatisticsPreviews(previews: StatisticsPreview[], categoryId: number | null): void {
+  statisticsPreviewGrid.replaceChildren();
+  const matching = categoryId === null ? [] : previews.filter((preview) => preview.categoryIds.includes(categoryId));
+  // Keep the overview scannable; the matching class can have many annotated images.
+  for (const preview of matching.slice(0, 8)) {
+    const card = document.createElement("figure");
+    card.className = "statistics-preview-card";
+    const image = document.createElement("img");
+    image.src = "/api/statistics/previews/" + encodeURIComponent(preview.imageId) + "?category_id=" + String(categoryId);
+    image.alt = preview.fileName + " with selected class overlay";
+    const caption = document.createElement("figcaption");
+    caption.textContent = preview.fileName;
+    card.append(image, caption);
+    statisticsPreviewGrid.append(card);
+  }
+  if (matching.length === 0) statisticsPreviewGrid.textContent = "No saved previews for this class.";
+}
+
+async function refreshStatistics(): Promise<void> {
+  statisticsTotal.textContent = "Refreshing saved annotations…";
+  statisticsList.replaceChildren();
+  try {
+    const response = await fetch("/api/statistics", { cache: "no-store" });
+    if (!response.ok) throw await responseErrorFromFetch(response);
+    const statistics = await response.json() as ClassStatistics;
+    const classes = [...statistics.classes].sort((left, right) =>
+      right.annotationCount - left.annotationCount || left.name.localeCompare(right.name),
+    );
+    statisticsTotal.textContent = statistics.totalAnnotations === 1
+      ? "1 saved annotation"
+      : String(statistics.totalAnnotations) + " saved annotations";
+    statisticsSnapshot = { ...statistics, classes };
+    selectedStatisticsClassId = classes[0]?.id ?? null;
+    renderStatisticsRows(classes);
+    renderStatisticsPreviews(statistics.previews ?? [], selectedStatisticsClassId);
+  } catch (error) {
+    statisticsTotal.textContent = "Statistics unavailable";
+    statisticsList.textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
+function setStatisticsViewer(visible: boolean): void {
+  statisticsViewer.hidden = !visible;
+  imageFrame.hidden = visible;
+  viewerFooter.hidden = visible;
+  progressTrack.hidden = visible;
+  if (visible) {
+    viewerTitle.textContent = "Annotation previews";
+  } else {
+    viewerTitle.textContent = activeImage?.name ?? currentFolder?.name ?? "No image selected";
+  }
+}
+
+function setSidebarTab(tab: "setup" | "masking" | "statistics"): void {
   activeSidebarTab = tab;
-  const isSetup = tab === "setup";
-  setupTab.classList.toggle("active", isSetup);
-  maskingTab.classList.toggle("active", !isSetup);
-  setupTab.setAttribute("aria-selected", String(isSetup));
-  maskingTab.setAttribute("aria-selected", String(!isSetup));
-  setupTab.tabIndex = isSetup ? 0 : -1;
-  maskingTab.tabIndex = isSetup ? -1 : 0;
-  setupPanel.hidden = !isSetup;
-  maskingPanel.hidden = isSetup;
+  const tabs: Array<[HTMLButtonElement, "setup" | "masking" | "statistics"]> = [
+    [setupTab, "setup"], [maskingTab, "masking"], [statisticsTab, "statistics"],
+  ];
+  const panels: Array<[HTMLDivElement, "setup" | "masking" | "statistics"]> = [
+    [setupPanel, "setup"], [maskingPanel, "masking"], [statisticsPanel, "statistics"],
+  ];
+  tabs.forEach(([button, value]) => {
+    const selected = value === tab;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+  });
+  panels.forEach(([panel, value]) => { panel.hidden = value !== tab; });
+  setStatisticsViewer(tab === "statistics");
+  if (tab === "statistics") void refreshStatistics();
 }
 
 function setTool(tool: ActiveTool): void {
@@ -1450,13 +1590,28 @@ function renderMaskPicker(): void {
   }
 }
 
+function touchClass(categoryId: number): void {
+  classUsageTick += 1;
+  classLastUsed.set(categoryId, classUsageTick);
+}
+
+function orderClasses(values: Category[]): Category[] {
+  return values
+    .map((category, index) => ({ category, index }))
+    .sort((left, right) => {
+      const usage = (classLastUsed.get(right.category.id) ?? 0) - (classLastUsed.get(left.category.id) ?? 0);
+      return usage || left.index - right.index;
+    })
+    .map(({ category }) => category);
+}
+
 function renderClassList(
   target: HTMLDivElement,
   values: Category[],
   selectedId: number,
 ): void {
   target.replaceChildren();
-  for (const category of values) {
+  for (const category of orderClasses(values)) {
     const option = document.createElement("button");
     option.type = "button";
     option.className = "class-option";
