@@ -194,9 +194,11 @@ export class MaskEditor {
       throw new Error("Base mask size does not match the current image.");
     }
     const output = new Uint8Array(this.base.length);
-    for (let index = 0; index < this.width * this.height; index += 1) {
-      if (this.displayedAt(index, base)) setBit(output, index, true);
+    for (let index = 0; index < output.length; index += 1) {
+      const raw = (base[index]! | this.forceOn[index]!) & ~this.forceOff[index]!;
+      output[index] = this.inverted ? ~raw : raw;
     }
+    this.clearPaddingBits(output);
     return output;
   }
 

@@ -23,11 +23,9 @@ The Python launcher discovers the installed NVIDIA runtime libraries and
 starts FastAPI on `127.0.0.1:8000`. It requires ONNX Runtime's CUDA provider;
 there is no slow CPU fallback. Vite proxies `/api` to that service.
 
-On first startup, embeddings are written to `.samotator-cache/embeddings/`
-while the selected image and its neighbors receive priority. For the current
-238-image dataset this uses about 4.7 GiB. Later runs reuse the persistent
-cache and warm it into an H100 LRU with a 16 GiB default budget. Override the
-budget with `SAMOTATOR_GPU_CACHE_GIB`.
+Embeddings are computed folder-on-demand and persisted under `.samotator-cache/embeddings/`. The selected image is prepared first, then its immediate neighbors, then the rest of the selected folder. Previously visited folders resume at low priority; unvisited folders are never queued. Hovering or drawing pauses new background encodes. Existing embeddings are reused through a persistent fingerprint catalog without hashing every source image at startup.
+
+Only the selected image and its neighbors are proactively kept on the H100. Other embeddings enter a 16 GiB GPU LRU when used, and duplicate image content shares the same GPU entry. Override the budget with `SAMOTATOR_GPU_CACHE_GIB`.
 
 If the ONNX sidecars are Git LFS pointer files, the server resolves their
 already-downloaded objects into `.samotator-cache/model/`. Missing LFS objects
@@ -54,8 +52,8 @@ images directly inside the current folder.
 - Set the navigation toggle to **Folders** to make **Previous** and **Next**
   move between sibling folders at the current level.
 - Set it to **Images** to move between images in the current folder.
-- **Rescan data folder** picks up added, modified, and removed files and queues
-  new embeddings without restarting the service.
+- **Rescan data folder** picks up added, modified, and removed files. New
+  embeddings are queued when their folder is selected.
 
 Supported file extensions are PNG, JPEG, WebP, GIF, BMP, TIFF, and AVIF.
 
@@ -82,9 +80,9 @@ that already reference their stable numeric ID.
 
 Annotation changes autosave after a short delay and can also be saved with the
 **Save** button or `Ctrl/Cmd+S`. Editable per-image drafts live under
-`data/.samotator/annotations/`. Standards-compliant COCO instance segmentation
-files are regenerated atomically under `data/annotations/`, using compressed
-RLE masks with bounding boxes and areas derived from the final binary masks.
+`data/.samotator/annotations/`. Standards-compliant COCO instance segmentation files are regenerated atomically under `data/annotations/`, using compressed RLE masks with bounding boxes and areas derived from the final binary masks. Draft saves and statistics update immediately; COCO regeneration is coalesced in the background so autosave never rescans the complete dataset.
+
+A rebuildable SQLite metadata index lives at `.samotator-cache/annotations.sqlite3`. The Statistics tab queries this index and requests at most eight cached 320 px WebP previews for the selected class. Rebuild the index from the editable drafts at any time with `python -m server.annotation_index rebuild`.
 
 The files under `sam3-q4/` must remain in their existing layout because both
 ONNX graphs reference their adjacent `.onnx_data` files by name.

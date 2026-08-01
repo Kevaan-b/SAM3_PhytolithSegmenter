@@ -39,7 +39,19 @@ interface WorkerLayer {
   editor: MaskEditor;
   lockedMask?: Uint8Array;
   previewing?: boolean;
+  effectiveMask?: Uint8Array;
+  committedEffectiveMask?: Uint8Array;
 }
+
+let maskSceneRevision = 0;
+let outlineCache: {
+  layerId: string;
+  sceneRevision: number;
+  width: number;
+  height: number;
+  radius: number;
+  mask: Uint8Array;
+} | undefined;
 
 worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
   switch (data.type) {
@@ -80,6 +92,8 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
       layer.editor.clearMask();
       layer.lockedMask = undefined;
       layer.previewing = false;
+      invalidateLayerMasks(layer);
+      invalidateScene();
       renderMasks();
       post({ type: "overlay-cleared", imageRevision: data.imageRevision, layerId: data.layerId, stateRevision: data.stateRevision });
       postEditState(data.imageRevision, data.layerId, 0);
@@ -108,6 +122,8 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
             postEditState(data.imageRevision, data.layerId, data.editRevision);
           }
         }
+        invalidateLayerMasks(getLayer(data.layerId));
+        invalidateScene();
         renderMasks();
       } catch (error) {
         postError("edit", error, data.imageRevision);
@@ -125,6 +141,8 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
         if (data.type === "invert-mask") editor.toggleInvert();
         if (data.type === "undo-edit") editor.undo();
         if (data.type === "reset-edits") editor.resetEdits();
+        invalidateLayerMasks(getLayer(data.layerId));
+        invalidateScene();
         enforceHistoryBudget();
         renderMasks();
         postEditState(data.imageRevision, data.layerId, data.editRevision);
@@ -136,6 +154,7 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
     case "create-layer": {
       if (data.imageRevision !== activeImageRevision || !canvas) return;
       createWorkerLayer(data.layer, canvas.width, canvas.height);
+      invalidateScene();
       renderMasks();
       postEditState(data.imageRevision, data.layer.id, 0);
       return;
@@ -155,8 +174,7 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
       if (data.imageRevision !== activeImageRevision) return;
       decodeQueue.clearPreview();
       for (const layer of maskLayers.values()) restoreLockedMask(layer);
-      getLayer(data.layerId);
-      activeLayerId = data.layerId;
+      activeLayerId = getLayer(data.layerId).id;
       activeStrokeId = -1;
       activeStrokeLayerId = "";
       renderMasks();
@@ -170,11 +188,13 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
       latestCommitRevision.delete(data.layerId);
       if (activeLayerId === data.layerId) activeLayerId = maskLayers.keys().next().value ?? "";
       if (latestMaskLayerId === data.layerId) latestMaskLayerId = activeLayerId;
+      invalidateScene();
       renderMasks();
       return;
     }
     case "set-overlap-prevention": {
       preventOverlap = data.enabled;
+      invalidateScene();
       if (data.imageRevision === activeImageRevision && maskLayers.has(data.activeLayerId)) {
         latestMaskLayerId = data.activeLayerId;
         renderMasks();
@@ -348,10 +368,12 @@ function prepareOverlay(
     const layer = getLayer(restored.layerId);
     layer.editor.setBaseMask(restored.mask);
     layer.lockedMask = restored.mask.slice();
+    invalidateLayerMasks(layer);
   }
   activeStrokeId = -1;
   activeStrokeLayerId = "";
   pixels = context.createImageData(width, height);
+  invalidateScene();
   renderMasks();
   for (const layer of maskLayers.values()) postEditState(activeImageRevision, layer.id, 0);
 }
@@ -396,7 +418,12 @@ function drawMask(mask: Uint8Array, width: number, height: number, layerId: stri
   latestMaskLayerId = layerId;
   layer.editor.setBaseMask(mask);
   layer.previewing = preview;
-  if (!preview) layer.lockedMask = mask.slice();
+  layer.effectiveMask = undefined;
+  if (!preview) {
+    layer.lockedMask = mask.slice();
+    layer.committedEffectiveMask = undefined;
+    invalidateScene();
+  }
   renderMasks();
   postEditState(activeImageRevision, layerId, 0);
 }
@@ -404,10 +431,10 @@ function drawMask(mask: Uint8Array, width: number, height: number, layerId: stri
 function renderMasks(): void {
   if (!context || !pixels || !canvas) return;
   const displayed = new Map<string, Uint8Array>();
-  for (const layer of maskLayers.values()) displayed.set(layer.id, layer.editor.displayedMask());
+  for (const layer of maskLayers.values()) displayed.set(layer.id, displayedMask(layer));
   const active = maskLayers.get(activeLayerId);
   let committedReference = active?.previewing && active.lockedMask
-    ? active.editor.displayedMask(active.lockedMask)
+    ? committedMask(active)
     : undefined;
   if (preventOverlap && latestMaskLayerId && displayed.has(latestMaskLayerId)) {
     const latest = displayed.get(latestMaskLayerId)!;
@@ -429,7 +456,7 @@ function renderMasks(): void {
     const previewMask = displayed.get(active.id)!;
     const outlinedMask = committedReference ?? previewMask;
     const outlineRadius = Math.max(2, Math.round(Math.min(canvas.width, canvas.height) / 300));
-    const edge = outerMaskOutline(outlinedMask, canvas.width, canvas.height, outlineRadius);
+    const edge = cachedOutline(active.id, outlinedMask, canvas.width, canvas.height, outlineRadius);
     if (committedReference) {
       const committedOnly = excludeOverlaps(
         committedReference,
@@ -437,10 +464,8 @@ function renderMasks(): void {
         canvas.width * canvas.height,
       );
       layers.push({ mask: committedOnly, color: active.color, alpha: 0.34 });
-      layers.push({ mask: previewMask, color: active.color, alpha: 0.5 });
-    } else {
-      layers.push({ mask: previewMask, color: active.color, alpha: 0.5 });
     }
+    layers.push({ mask: previewMask, color: active.color, alpha: 0.5 });
     layers.push({ mask: edge, color: [199, 255, 76] as const, alpha: 0.96 });
   }
   compositeMasks(pixels.data, canvas.width * canvas.height, layers);
@@ -456,6 +481,8 @@ function clearOverlay(): void {
   activeStrokeId = -1;
   activeStrokeLayerId = "";
   pixels = undefined;
+  maskSceneRevision = 0;
+  outlineCache = undefined;
   if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
 }
 
@@ -475,15 +502,72 @@ function getLayer(layerId: string): WorkerLayer {
 }
 
 function restoreLockedMask(layer: WorkerLayer): void {
+  if (!layer.previewing) return;
   if (layer.lockedMask) layer.editor.setBaseMask(layer.lockedMask);
   else layer.editor.clearBaseMask();
   layer.previewing = false;
+  layer.effectiveMask = layer.committedEffectiveMask;
 }
 
 function commitPreview(layer: WorkerLayer): void {
   if (!layer.previewing) return;
   layer.lockedMask = layer.editor.baseMask();
   layer.previewing = false;
+  layer.committedEffectiveMask = layer.effectiveMask;
+  invalidateScene();
+}
+
+function displayedMask(layer: WorkerLayer): Uint8Array {
+  if (!layer.effectiveMask) layer.effectiveMask = layer.editor.displayedMask();
+  if (!layer.previewing && layer.lockedMask && !layer.committedEffectiveMask) {
+    layer.committedEffectiveMask = layer.effectiveMask;
+  }
+  return layer.effectiveMask;
+}
+
+function committedMask(layer: WorkerLayer): Uint8Array {
+  if (!layer.lockedMask) throw new Error("The committed mask is unavailable.");
+  if (!layer.committedEffectiveMask) {
+    layer.committedEffectiveMask = layer.editor.displayedMask(layer.lockedMask);
+  }
+  return layer.committedEffectiveMask;
+}
+
+function invalidateLayerMasks(layer: WorkerLayer): void {
+  layer.effectiveMask = undefined;
+  layer.committedEffectiveMask = undefined;
+}
+
+function invalidateScene(): void {
+  maskSceneRevision += 1;
+  outlineCache = undefined;
+}
+
+function cachedOutline(
+  layerId: string,
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  radius: number,
+): Uint8Array {
+  if (
+    !outlineCache ||
+    outlineCache.layerId !== layerId ||
+    outlineCache.sceneRevision !== maskSceneRevision ||
+    outlineCache.width !== width ||
+    outlineCache.height !== height ||
+    outlineCache.radius !== radius
+  ) {
+    outlineCache = {
+      layerId,
+      sceneRevision: maskSceneRevision,
+      width,
+      height,
+      radius,
+      mask: outerMaskOutline(mask, width, height, radius),
+    };
+  }
+  return outlineCache.mask;
 }
 
 function parseColor(color: string): [number, number, number] {

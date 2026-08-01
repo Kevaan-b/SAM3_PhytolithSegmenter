@@ -4,6 +4,12 @@ export interface CompositeLayer {
   alpha: number;
 }
 
+const alphaTables = new Map<number, {
+  sourceAlphaByte: number;
+  outputAlpha: Uint8Array;
+  sourceWeight: Float32Array;
+}>();
+
 export function outerMaskOutline(
   mask: Uint8Array,
   width: number,
@@ -16,30 +22,50 @@ export function outerMaskOutline(
   const pixelCount = width * height;
   if (mask.byteLength !== Math.ceil(pixelCount / 8)) throw new Error("Mask dimensions do not match.");
   const distance = Math.max(1, Math.floor(radius));
-  const stride = width + 1;
-  const integral = new Uint32Array(stride * (height + 1));
+  const horizontal = new Uint8Array(pixelCount);
   for (let y = 0; y < height; y += 1) {
-    let rowTotal = 0;
+    const row = y * width;
+    let nearby = 0;
+    for (let x = 0; x < Math.min(width, distance + 1); x += 1) {
+      nearby += (mask[(row + x) >> 3]! >> ((row + x) & 7)) & 1;
+    }
     for (let x = 0; x < width; x += 1) {
-      const index = y * width + x;
-      rowTotal += (mask[index >> 3]! >> (index & 7)) & 1;
-      integral[(y + 1) * stride + x + 1] = integral[y * stride + x + 1]! + rowTotal;
+      horizontal[row + x] = nearby > 0 ? 1 : 0;
+      const remove = x - distance;
+      if (remove >= 0) nearby -= (mask[(row + remove) >> 3]! >> ((row + remove) & 7)) & 1;
+      const add = x + distance + 1;
+      if (add < width) nearby += (mask[(row + add) >> 3]! >> ((row + add) & 7)) & 1;
+    }
+  }
+
+  const verticalCounts = new Uint32Array(width);
+  for (let y = 0; y < Math.min(height, distance + 1); y += 1) {
+    const row = y * width;
+    for (let x = 0; x < width; x += 1) {
+      verticalCounts[x] = verticalCounts[x]! + horizontal[row + x]!;
     }
   }
   const outline = new Uint8Array(mask.byteLength);
   for (let y = 0; y < height; y += 1) {
-    const top = Math.max(0, y - distance);
-    const bottom = Math.min(height, y + distance + 1);
+    const row = y * width;
     for (let x = 0; x < width; x += 1) {
-      const index = y * width + x;
+      const index = row + x;
       if ((mask[index >> 3]! & (1 << (index & 7))) !== 0) continue;
-      const left = Math.max(0, x - distance);
-      const right = Math.min(width, x + distance + 1);
-      const nearby = integral[bottom * stride + right]!
-        - integral[top * stride + right]!
-        - integral[bottom * stride + left]!
-        + integral[top * stride + left]!;
-      if (nearby > 0) outline[index >> 3] = outline[index >> 3]! | (1 << (index & 7));
+      if (verticalCounts[x]! > 0) outline[index >> 3] = outline[index >> 3]! | (1 << (index & 7));
+    }
+    const remove = y - distance;
+    if (remove >= 0) {
+      const removeRow = remove * width;
+      for (let x = 0; x < width; x += 1) {
+        verticalCounts[x] = verticalCounts[x]! - horizontal[removeRow + x]!;
+      }
+    }
+    const add = y + distance + 1;
+    if (add < height) {
+      const addRow = add * width;
+      for (let x = 0; x < width; x += 1) {
+        verticalCounts[x] = verticalCounts[x]! + horizontal[addRow + x]!;
+      }
     }
   }
   return outline;
@@ -80,32 +106,52 @@ function compositeLayer(
   pixelCount: number,
   layer: CompositeLayer,
 ): void {
-  const sourceAlpha = layer.alpha;
-  const sourceAlphaByte = Math.round(sourceAlpha * 255);
-  const outputAlpha = new Uint8Array(256);
-  const sourceWeight = new Float32Array(256);
+  const table = alphaTable(layer.alpha);
+  for (let byteIndex = 0; byteIndex < layer.mask.length; byteIndex += 1) {
+    let bits = layer.mask[byteIndex]!;
+    if (bits === 0) continue;
+    const firstPixel = byteIndex * 8;
+    for (let bit = 0; bits !== 0 && bit < 8; bit += 1, bits >>= 1) {
+      if ((bits & 1) === 0) continue;
+      const pixelIndex = firstPixel + bit;
+      if (pixelIndex >= pixelCount) break;
+      const offset = pixelIndex * 4;
+      const destinationAlphaByte = target[offset + 3]!;
+      if (destinationAlphaByte === 0) {
+        target[offset] = layer.color[0];
+        target[offset + 1] = layer.color[1];
+        target[offset + 2] = layer.color[2];
+        target[offset + 3] = table.sourceAlphaByte;
+        continue;
+      }
+      const weight = table.sourceWeight[destinationAlphaByte]!;
+      const priorWeight = 1 - weight;
+      target[offset] = Math.round(layer.color[0] * weight + target[offset]! * priorWeight);
+      target[offset + 1] = Math.round(layer.color[1] * weight + target[offset + 1]! * priorWeight);
+      target[offset + 2] = Math.round(layer.color[2] * weight + target[offset + 2]! * priorWeight);
+      target[offset + 3] = table.outputAlpha[destinationAlphaByte]!;
+    }
+  }
+}
+
+function alphaTable(sourceAlpha: number): {
+  sourceAlphaByte: number;
+  outputAlpha: Uint8Array;
+  sourceWeight: Float32Array;
+} {
+  const cached = alphaTables.get(sourceAlpha);
+  if (cached) return cached;
+  const table = {
+    sourceAlphaByte: Math.round(sourceAlpha * 255),
+    outputAlpha: new Uint8Array(256),
+    sourceWeight: new Float32Array(256),
+  };
   for (let destinationAlphaByte = 0; destinationAlphaByte < 256; destinationAlphaByte += 1) {
     const destinationAlpha = destinationAlphaByte / 255;
     const output = sourceAlpha + destinationAlpha * (1 - sourceAlpha);
-    outputAlpha[destinationAlphaByte] = Math.round(output * 255);
-    sourceWeight[destinationAlphaByte] = sourceAlpha / output;
+    table.outputAlpha[destinationAlphaByte] = Math.round(output * 255);
+    table.sourceWeight[destinationAlphaByte] = sourceAlpha / output;
   }
-  for (let index = 0; index < pixelCount; index += 1) {
-    if ((layer.mask[index >> 3]! & (1 << (index & 7))) === 0) continue;
-    const offset = index * 4;
-    const destinationAlphaByte = target[offset + 3]!;
-    if (destinationAlphaByte === 0) {
-      target[offset] = layer.color[0];
-      target[offset + 1] = layer.color[1];
-      target[offset + 2] = layer.color[2];
-      target[offset + 3] = sourceAlphaByte;
-      continue;
-    }
-    const weight = sourceWeight[destinationAlphaByte]!;
-    const priorWeight = 1 - weight;
-    target[offset] = Math.round(layer.color[0] * weight + target[offset]! * priorWeight);
-    target[offset + 1] = Math.round(layer.color[1] * weight + target[offset + 1]! * priorWeight);
-    target[offset + 2] = Math.round(layer.color[2] * weight + target[offset + 2]! * priorWeight);
-    target[offset + 3] = outputAlpha[destinationAlphaByte]!;
-  }
+  alphaTables.set(sourceAlpha, table);
+  return table;
 }
