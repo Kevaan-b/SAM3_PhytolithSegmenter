@@ -1495,6 +1495,18 @@ button:focus-visible {
 .sidebar-panel > .control-section:first-child { border-top: 0; padding-top: 6px; }
 .sidebar-panel .control-section { padding: 16px 0; }
 .panel-hint { margin: -5px 0 10px; color: #7e8881; font-size: 10px; line-height: 1.45; }
+.class-search {
+  width: 100%;
+  height: 30px;
+  margin: 0 0 7px;
+  padding: 0 8px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid rgba(29, 36, 32, 0.14);
+  border-radius: 3px;
+  font: inherit;
+  font-size: 10px;
+}
 
 .setup-class-list,
 .masking-class-section .class-list { max-height: min(154px, 22vh); }

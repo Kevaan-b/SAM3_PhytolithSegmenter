@@ -202,7 +202,8 @@ async function watchService(): Promise<void> {
       const response = await fetch("/api/status", { cache: "no-store" });
       if (!response.ok) throw new Error(`H100 service returned HTTP ${response.status}.`);
       const status = (await response.json()) as ServiceStatus;
-      post({ type: "cache-status", ...status.cache, queueDepth: status.queueDepth });
+      post({ type: "cache-status", ...status.cache, queueDepth: status.queueDepth,
+        currentJob: status.currentJob, backgroundPaused: status.backgroundPaused, activeFolder: status.activeFolder });
       if (status.error) throw new Error(status.error);
       if (status.ready && !serviceReady) {
         serviceReady = true;
@@ -522,6 +523,9 @@ interface ServiceStatus {
   ready: boolean;
   error: string | null;
   queueDepth: number;
+  currentJob: string | null;
+  backgroundPaused: boolean;
+  activeFolder: { path: string; ready: number; total: number };
   cache: { missing: number; queued: number; encoding: number; ready: number; total: number; gpuResident: number };
 }
 

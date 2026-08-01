@@ -19,7 +19,7 @@ from .cache import (
     EMBEDDING_KEYS,
     ByteLru,
     cache_file_is_valid,
-    cache_key,
+    ImageFingerprintIndex,
     load_embedding,
     materialize_external_data,
     model_fingerprint,
@@ -43,55 +43,115 @@ class GpuEmbedding:
 class QueuedJob:
     priority: int
     sequence: int
+    version: int = field(compare=False)
+    key: str | None = field(compare=False)
     future: concurrent.futures.Future = field(compare=False)
     callback: Callable = field(compare=False)
 
 
 class PriorityGpuExecutor:
+    """Single-GPU executor with keyed decrease/increase-priority updates."""
+
     def __init__(self) -> None:
         self._condition = threading.Condition()
         self._jobs: list[QueuedJob] = []
+        self._pending: dict[str, QueuedJob] = {}
         self._sequence = 0
+        self._unkeyed = 0
         self._stopped = False
+        self._interactive = False
+        self._foreground_until = 0.0
+        self._current_job: str | None = None
         self._thread = threading.Thread(target=self._run, daemon=True, name="sam3-gpu")
         self._thread.start()
 
-    def submit(self, priority: int, callback: Callable):
-        future: concurrent.futures.Future = concurrent.futures.Future()
+    def submit(self, priority: int, callback: Callable, key: str | None = None):
         with self._condition:
+            if priority == 0:
+                self._foreground_until = time.monotonic() + 0.25
+            if key is not None and key in self._pending:
+                previous = self._pending[key]
+                self._sequence += 1
+                job = QueuedJob(priority, self._sequence, previous.version + 1, key, previous.future, callback)
+                self._pending[key] = job
+                heapq.heappush(self._jobs, job)
+                self._condition.notify_all()
+                return previous.future
+            future: concurrent.futures.Future = concurrent.futures.Future()
             self._sequence += 1
-            heapq.heappush(
-                self._jobs,
-                QueuedJob(priority, self._sequence, future, callback),
-            )
-            self._condition.notify()
-        return future
+            job = QueuedJob(priority, self._sequence, 1, key, future, callback)
+            if key is not None:
+                self._pending[key] = job
+            else:
+                self._unkeyed += 1
+            heapq.heappush(self._jobs, job)
+            self._condition.notify_all()
+            return future
+
+    def set_interactive(self, active: bool) -> None:
+        with self._condition:
+            self._interactive = active
+            self._condition.notify_all()
 
     @property
     def queue_depth(self) -> int:
         with self._condition:
-            return len(self._jobs)
+            return len(self._pending) + self._unkeyed
+
+    @property
+    def current_job(self) -> str | None:
+        with self._condition:
+            return self._current_job
+
+    @property
+    def background_paused(self) -> bool:
+        with self._condition:
+            return self._interactive or time.monotonic() < self._foreground_until
 
     def stop(self) -> None:
         with self._condition:
             self._stopped = True
-            self._condition.notify()
+            self._condition.notify_all()
         self._thread.join(timeout=5)
+
+    def _next_job(self) -> QueuedJob | None:
+        while self._jobs:
+            job = heapq.heappop(self._jobs)
+            if job.key is not None and self._pending.get(job.key) is not job:
+                continue
+            if job.future.done():
+                if job.key is not None: self._pending.pop(job.key, None)
+                continue
+            return job
+        return None
 
     def _run(self) -> None:
         while True:
             with self._condition:
-                while not self._jobs and not self._stopped:
+                job = self._next_job()
+                while job is None and not self._stopped:
                     self._condition.wait()
-                if self._stopped:
-                    return
-                job = heapq.heappop(self._jobs)
-            if job.future.done():
-                continue
+                    job = self._next_job()
+                if self._stopped: return
+                assert job is not None
+                paused_for = max(0.0, self._foreground_until - time.monotonic())
+                if job.priority >= 30 and (self._interactive or paused_for > 0):
+                    heapq.heappush(self._jobs, job)
+                    self._condition.wait(timeout=0.1 if self._interactive else paused_for)
+                    continue
+                if job.key is not None:
+                    self._pending.pop(job.key, None)
+                else:
+                    self._unkeyed -= 1
+                self._current_job = job.key or "foreground"
             try:
                 job.future.set_result(job.callback())
             except BaseException as error:
                 job.future.set_exception(error)
+            finally:
+                with self._condition:
+                    self._current_job = None
+                    self._condition.notify_all()
 
 
 class SamEngine:
@@ -100,6 +160,7 @@ class SamEngine:
         self.data_root = self.project_root / "data"
         self.cache_root = self.project_root / ".samotator-cache"
         self.embedding_root = self.cache_root / "embeddings"
+        self.fingerprints = ImageFingerprintIndex(self.cache_root / "image-fingerprints.json")
         self.gpu_cache = ByteLru[GpuEmbedding](int(gpu_budget_gib * 1024**3))
         self.executor = PriorityGpuExecutor()
         self.lock = threading.RLock()
@@ -116,6 +177,16 @@ class SamEngine:
         self.decoder: ort.InferenceSession | None = None
         self.last_encode_ms: float | None = None
         self.last_decode_ms: float | None = None
+        self.active_folder = ""
+        self.selected_image: str | None = None
+        self.visited_folders: set[str] = set()
+        self.promote_ids: set[str] = set()
+        self.folder_order: list[str] = []
+        self.preprocess_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="sam3-preprocess")
+        self.preprocess_futures: dict[str, concurrent.futures.Future] = {}
+        self.cache_writer = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="sam3-cache-writer")
+        self.write_slots = threading.Semaphore(2)
+        self.pending_arrays: dict[str, tuple[dict[str, np.ndarray], tuple[int, int], tuple[int, int]]] = {}
 
     def initialize(self) -> None:
         try:
@@ -137,15 +208,13 @@ class SamEngine:
             )
             self.embedding_root.mkdir(parents=True, exist_ok=True)
             for identifier, record in self.records.items():
-                key = cache_key(record.absolute_path, self.model_fingerprint)
-                path = self.embedding_root / f"{key}.safetensors"
-                self.keys[identifier] = key
-                self.cache_paths[identifier] = path
-                self.states[identifier] = "ready" if cache_file_is_valid(path) else "missing"
-            active_paths = set(self.cache_paths.values())
-            for stale in self.embedding_root.glob("*.safetensors"):
-                if stale not in active_paths:
-                    stale.unlink(missing_ok=True)
+                key = self.fingerprints.cached_key(record.relative_path, record.absolute_path, self.model_fingerprint)
+                if key:
+                    path = self.embedding_root / f"{key}.safetensors"
+                    self.keys[identifier] = key
+                    self.cache_paths[identifier] = path
+                    self.states[identifier] = "ready" if cache_file_is_valid(path) else "missing"
+            self.fingerprints.remove_missing({record.relative_path for record in self.records.values()})
 
             providers = ["CUDAExecutionProvider"]
             self.encoder = ort.InferenceSession(
@@ -158,42 +227,44 @@ class SamEngine:
                 raise RuntimeError("SAM3 encoder did not initialize on CUDA.")
             self.device = "CUDAExecutionProvider"
             self.ready = True
-            for identifier in self.records:
-                self.queue_embedding(identifier, 100)
         except BaseException as error:
             self.error = str(error)
             self.device = "error"
 
     def refresh_manifest(self) -> dict:
         tree, records = scan_data(self.data_root)
-        changed: list[str] = []
         with self.lock:
             removed = set(self.records) - set(records)
             for identifier in removed:
+                old_key = self.keys.pop(identifier, None)
                 self.states.pop(identifier, None)
-                self.keys.pop(identifier, None)
                 self.cache_paths.pop(identifier, None)
                 self.encode_futures.pop(identifier, None)
-                self.gpu_cache.discard(identifier)
+                self.preprocess_futures.pop(identifier, None)
+                if old_key: self.gpu_cache.discard(old_key)
             for identifier, record in records.items():
+                self.states.setdefault(identifier, "missing")
                 if not self.model_fingerprint:
-                    self.states.setdefault(identifier, "missing")
                     continue
-                key = cache_key(record.absolute_path, self.model_fingerprint)
-                path = self.embedding_root / f"{key}.safetensors"
-                if self.keys.get(identifier) == key:
+                key = self.fingerprints.cached_key(record.relative_path, record.absolute_path, self.model_fingerprint)
+                previous_key = self.keys.get(identifier)
+                if key == previous_key:
                     continue
-                self.gpu_cache.discard(identifier)
-                self.keys[identifier] = key
-                self.cache_paths[identifier] = path
-                self.states[identifier] = "ready" if cache_file_is_valid(path) else "missing"
+                if previous_key:
+                    self.gpu_cache.discard(previous_key)
+                self.keys.pop(identifier, None)
+                self.cache_paths.pop(identifier, None)
+                if key:
+                    path = self.embedding_root / f"{key}.safetensors"
+                    self.keys[identifier] = key
+                    self.cache_paths[identifier] = path
+                    self.states[identifier] = "ready" if cache_file_is_valid(path) else "missing"
+                else:
+                    self.states[identifier] = "missing"
                 self.encode_futures.pop(identifier, None)
-                changed.append(identifier)
             self.tree, self.records = tree, records
             set_cache_states(tree, self.states)
-        if self.ready:
-            for identifier in changed:
-                self.queue_embedding(identifier, 100)
+        self.fingerprints.remove_missing({record.relative_path for record in records.values()})
         return tree
 
     def manifest(self) -> dict:
@@ -212,6 +283,9 @@ class SamEngine:
                 "device": self.device,
                 "cache": {**counts, "total": len(self.records), "gpuResident": len(self.gpu_cache)},
                 "queueDepth": self.executor.queue_depth,
+                "currentJob": self.executor.current_job,
+                "backgroundPaused": self.executor.background_paused,
+                "activeFolder": self._active_folder_status(),
                 "lastEncodeMs": self.last_encode_ms,
                 "lastDecodeMs": self.last_decode_ms,
             }
@@ -222,39 +296,93 @@ class SamEngine:
         except KeyError as error:
             raise KeyError("Unknown image ID.") from error
 
+    def prioritize_folder(self, folder_path: str, selected_id: str | None = None) -> dict:
+        folder = [item.id for item in self.records.values() if item.folder_path == folder_path]
+        if not folder and folder_path not in self._folder_paths():
+            raise KeyError("Unknown folder path.")
+        if selected_id is not None and selected_id not in folder:
+            raise KeyError("Selected image is not in the requested folder.")
+        previous = self.active_folder
+        self.active_folder = folder_path
+        self.visited_folders.add(folder_path)
+        if previous != folder_path:
+            for pending_id, future in list(self.preprocess_futures.items()):
+                record = self.records.get(pending_id)
+                if record and record.folder_path != folder_path and future.cancel():
+                    self.preprocess_futures.pop(pending_id, None)
+        if previous != folder_path:
+            for item in self.records.values():
+                if item.folder_path == previous and self.states.get(item.id) in {"missing", "queued"}:
+                    self.queue_embedding(item.id, 80)
+        selected = selected_id or (folder[0] if folder else None)
+        self.selected_image = selected
+        self.promote_ids = set()
+        if selected:
+            index = folder.index(selected)
+            self.promote_ids.add(selected)
+            self.queue_embedding(selected, 10)
+            for neighbor in (index - 1, index + 1):
+                if 0 <= neighbor < len(folder):
+                    self.promote_ids.add(folder[neighbor])
+                    self.queue_embedding(folder[neighbor], 20)
+        remainder = [item for item in folder if item not in self.promote_ids]
+        self.folder_order = ([selected] if selected else []) + [item for item in folder if item in self.promote_ids and item != selected] + remainder
+        for item in remainder:
+            self.queue_embedding(item, 30)
+        self._prime_preprocessing()
+        return self._active_folder_status()
+
     def prioritize(self, identifier: str) -> concurrent.futures.Future:
         record = self.get_record(identifier)
-        future = self.queue_embedding(identifier, 10)
-        folder = [
-            item.id for item in self.records.values() if item.folder_path == record.folder_path
-        ]
-        index = folder.index(identifier)
-        for neighbor in (index - 1, index + 1):
-            if 0 <= neighbor < len(folder):
-                self.queue_embedding(folder[neighbor], 20)
-        for item in folder:
-            if item != identifier:
-                self.queue_embedding(item, 30)
-        return future
+        self.prioritize_folder(record.folder_path, identifier)
+        return self.queue_embedding(identifier, 10)
+
+    def set_interactive(self, active: bool) -> None:
+        self.executor.set_interactive(active)
+
+    def _folder_paths(self) -> set[str]:
+        paths = {""}
+        def visit(folder: dict) -> None:
+            paths.add(folder["path"])
+            for child in folder["folders"]: visit(child)
+        visit(self.tree)
+        return paths
+
+    def _active_folder_status(self) -> dict:
+        identifiers = [item.id for item in self.records.values() if item.folder_path == self.active_folder]
+        return {"path": self.active_folder, "ready": sum(self.states.get(item) == "ready" for item in identifiers), "total": len(identifiers)}
+
+    def _prime_preprocessing(self) -> None:
+        for identifier in self.folder_order:
+            if len(self.preprocess_futures) >= 2:
+                break
+            if self.states.get(identifier) not in {"missing", "queued"} or identifier in self.preprocess_futures:
+                continue
+            record = self.records.get(identifier)
+            if record is not None:
+                self.preprocess_futures[identifier] = self.preprocess_pool.submit(preprocess_image, record.absolute_path)
 
     def queue_embedding(self, identifier: str, priority: int):
         with self.lock:
-            resident = self.gpu_cache.get(identifier)
+            key = self.keys.get(identifier)
+            resident = self.gpu_cache.get(key) if key else None
             if resident is not None:
                 completed: concurrent.futures.Future = concurrent.futures.Future()
                 completed.set_result(resident)
                 return completed
+            if self.states.get(identifier) == "ready" and priority >= 30:
+                completed: concurrent.futures.Future = concurrent.futures.Future()
+                completed.set_result(None)
+                return completed
             existing = self.encode_futures.get(identifier)
             if existing and not existing.done():
-                # Add a higher-priority route to the same computation.
-                if priority < 100:
-                    self.executor.submit(priority, lambda: self._complete_shared(identifier, existing))
+                self.executor.submit(priority, lambda: self._complete_shared(identifier, existing), key=f"embedding:{identifier}")
                 return existing
             if self.states.get(identifier) != "ready":
                 self.states[identifier] = "queued"
             shared: concurrent.futures.Future = concurrent.futures.Future()
             self.encode_futures[identifier] = shared
-            self.executor.submit(priority, lambda: self._complete_shared(identifier, shared))
+            self.executor.submit(priority, lambda: self._complete_shared(identifier, shared), key=f"embedding:{identifier}")
             return shared
 
     def _complete_shared(self, identifier: str, shared):
@@ -271,36 +399,70 @@ class SamEngine:
                 shared.set_exception(error)
             raise
 
-    def _ensure_embedding(self, identifier: str) -> GpuEmbedding:
-        cached = self.gpu_cache.get(identifier)
+    def _ensure_embedding(self, identifier: str) -> GpuEmbedding | None:
+        record = self.records[identifier]
+        key = self.keys.get(identifier)
+        if not key:
+            key = self.fingerprints.resolve_key(record.relative_path, record.absolute_path, self.model_fingerprint)
+            self.keys[identifier] = key
+            self.cache_paths[identifier] = self.embedding_root / f"{key}.safetensors"
+        cached = self.gpu_cache.get(key)
         if cached:
             return cached
+        pending = self.pending_arrays.get(identifier)
+        if pending is not None:
+            arrays, original, reshaped = pending
+            if identifier not in self.promote_ids:
+                return None
+            embedding = self._to_gpu(arrays, original, reshaped)
+            self.gpu_cache.put(key, embedding, embedding.size_bytes)
+            return embedding
         path = self.cache_paths[identifier]
         if cache_file_is_valid(path):
             try:
                 arrays, original, reshaped = load_embedding(path)
-                embedding = self._to_gpu(arrays, original, reshaped)
-                self.gpu_cache.put(identifier, embedding, embedding.size_bytes)
                 self.states[identifier] = "ready"
+                if identifier not in self.promote_ids:
+                    return None
+                embedding = self._to_gpu(arrays, original, reshaped)
+                self.gpu_cache.put(key, embedding, embedding.size_bytes)
                 return embedding
             except Exception:
                 path.unlink(missing_ok=True)
 
         self.states[identifier] = "encoding"
         started = time.perf_counter()
-        pixels, original, reshaped = preprocess_image(self.records[identifier].absolute_path)
+        prepared = self.preprocess_futures.pop(identifier, None)
+        self._prime_preprocessing()
+        pixels, original, reshaped = prepared.result() if prepared else preprocess_image(self.records[identifier].absolute_path)
         assert self.encoder is not None
         values = self.encoder.run(None, {"pixel_values": pixels})
         arrays = {
             key: np.asarray(value, dtype=np.float32)
             for key, value in zip(EMBEDDING_KEYS, values, strict=True)
         }
-        save_embedding(path, arrays, original, reshaped)
-        embedding = self._to_gpu(arrays, original, reshaped)
-        self.gpu_cache.put(identifier, embedding, embedding.size_bytes)
+        self.write_slots.acquire()
+        self.pending_arrays[identifier] = (arrays, original, reshaped)
+        self.cache_writer.submit(self._persist_embedding, identifier, path, arrays, original, reshaped)
+        embedding = self._to_gpu(arrays, original, reshaped) if identifier in self.promote_ids else None
+        if embedding is not None:
+            self.gpu_cache.put(key, embedding, embedding.size_bytes)
         self.last_encode_ms = (time.perf_counter() - started) * 1000
         self.states[identifier] = "ready"
         return embedding
+
+    def _persist_embedding(self, identifier: str, path: Path, arrays, original, reshaped) -> None:
+        try:
+            save_embedding(path, arrays, original, reshaped)
+            self.states[identifier] = "ready"
+        except Exception:
+            self.states[identifier] = "missing"
+            path.unlink(missing_ok=True)
+        finally:
+            current = self.pending_arrays.get(identifier)
+            if current is not None and current[0] is arrays:
+                self.pending_arrays.pop(identifier, None)
+            self.write_slots.release()
 
     def _to_gpu(self, arrays, original, reshaped) -> GpuEmbedding:
         tensors = {
@@ -339,7 +501,9 @@ class SamEngine:
 
     def _segment_sync(self, identifier: str, points: list[dict]) -> tuple[bytes, dict]:
         started = time.perf_counter()
+        self.promote_ids.add(identifier)
         embedding = self._ensure_embedding(identifier)
+        assert embedding is not None
         coordinates = np.asarray(
             [
                 [
@@ -385,6 +549,9 @@ class SamEngine:
 
     def shutdown(self) -> None:
         self.executor.stop()
+        self.preprocess_pool.shutdown(wait=False, cancel_futures=True)
+        self.cache_writer.shutdown(wait=True, cancel_futures=False)
+        self.fingerprints.flush()
 
 
 def preprocess_image(path: Path):

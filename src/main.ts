@@ -74,6 +74,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <section class="control-section class-setup-section">
             <div class="section-heading"><span>02</span><h2>Class definitions</h2></div>
             <p class="panel-hint">Names and colors apply everywhere this class is used.</p>
+            <input class="class-search" id="setup-class-search" type="search" placeholder="Search classes" aria-label="Search class definitions" />
             <div class="class-list setup-class-list" id="setup-class-list" role="listbox" aria-label="Class definitions"></div>
             <div class="mask-layer-editor class-definition-editor">
               <label for="mask-layer-name">Name</label><input id="mask-layer-name" maxlength="80" />
@@ -99,6 +100,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
           <section class="control-section masking-class-section">
             <div class="section-heading"><span>02</span><h2>Class</h2></div>
             <p class="panel-hint">Choose the class for the active mask and the next new mask.</p>
+            <input class="class-search" id="masking-class-search" type="search" placeholder="Search classes" aria-label="Search mask classes" />
             <div class="class-list" id="new-mask-class" role="listbox" aria-label="Mask class"></div>
           </section>
           <section class="control-section masks-section">
@@ -117,6 +119,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
             <div class="section-heading"><span>01</span><h2>Annotation statistics</h2></div>
             <p class="panel-hint">Saved instances across the annotations folder. Refreshes whenever you open this tab.</p>
             <div class="statistics-total" id="statistics-total" aria-live="polite">Loading saved annotations…</div>
+            <input class="class-search" id="statistics-class-search" type="search" placeholder="Search classes" aria-label="Search statistics classes" />
             <div class="statistics-list" id="statistics-list" aria-live="polite"></div>
           </section>
         </div>
@@ -209,11 +212,14 @@ const maskingPanel = getElement<HTMLDivElement>("masking-panel");
 const statisticsPanel = getElement<HTMLDivElement>("statistics-panel");
 const statisticsTotal = getElement<HTMLDivElement>("statistics-total");
 const statisticsList = getElement<HTMLDivElement>("statistics-list");
+const statisticsClassSearch = getElement<HTMLInputElement>("statistics-class-search");
 const setupClassList = getElement<HTMLDivElement>("setup-class-list");
+const setupClassSearch = getElement<HTMLInputElement>("setup-class-search");
 const maskLayerList = getElement<HTMLDivElement>("mask-layer-list");
 const maskCount = getElement<HTMLSpanElement>("mask-count");
 const addMaskButton = getElement<HTMLButtonElement>("add-mask");
 const newMaskClass = getElement<HTMLDivElement>("new-mask-class");
+const maskingClassSearch = getElement<HTMLInputElement>("masking-class-search");
 const newClassForm = getElement<HTMLFormElement>("new-class-form");
 const newClassName = getElement<HTMLInputElement>("new-class-name");
 const maskLayerName = getElement<HTMLInputElement>("mask-layer-name");
@@ -258,13 +264,13 @@ interface StatisticsPreview {
   imageId: string;
   fileName: string;
   annotationCount: number;
-  categoryIds: number[];
+  savedAt: string;
+  previewUrl: string;
 }
 
 interface ClassStatistics {
   totalAnnotations: number;
   classes: Array<Category & { annotationCount: number }>;
-  previews: StatisticsPreview[];
 }
 
 interface SavedDraftLayer { layerId: string; annotationId: number; categoryId: number; rawMask: string; effectiveMask: string }
@@ -289,10 +295,13 @@ const maskLayers = new MaskLayerCollection();
 let categories: Category[] = [{ id: 1, name: "object", supercategory: "phytolith", color: "#4094dc", active: true }];
 let selectedClassId = 1;
 let classUsageTick = 0;
+let lastTouchedClassId: number | null = null;
 const classLastUsed = new Map<number, number>();
 let activeSidebarTab: "setup" | "masking" | "statistics" = "masking";
 let statisticsSnapshot: ClassStatistics | null = null;
 let selectedStatisticsClassId: number | null = null;
+let statisticsController: AbortController | null = null;
+let previewController: AbortController | null = null;
 let preventOverlap = false;
 let dirty = false;
 let annotationRevision = 0;
@@ -399,10 +408,14 @@ if (
       }
 
       case "cache-status": {
-        dataSummary.textContent = `${message.ready}/${message.total} embeddings cached · ${message.gpuResident} on H100 · ${message.queueDepth} queued`;
-        if (message.total > 0 && message.ready < message.total) {
+        const folder = message.activeFolder;
+        dataSummary.textContent = folder && folder.total > 0
+          ? `${folder.ready}/${folder.total} ready in ${folder.path || "Data"} · ${message.gpuResident} on H100 · ${message.queueDepth} queued${message.backgroundPaused ? " · paused while annotating" : ""}`
+          : `${message.ready} embeddings cached · ${message.gpuResident} on H100`;
+
+        if (folder && folder.total > 0 && folder.ready < folder.total) {
           progressTrack.classList.add("visible");
-          progressBar.style.width = `${(message.ready / message.total) * 100}%`;
+          progressBar.style.width = String((folder.ready / folder.total) * 100) + "%";
         } else if (modelReady) {
           progressTrack.classList.remove("visible");
         }
@@ -591,6 +604,7 @@ if (
       if (!response.ok) throw await responseErrorFromFetch(response);
       dirty = annotationRevision !== savedAnnotationRevision;
       lastSaveError = null;
+      void refreshStatistics(activeSidebarTab === "statistics");
       return true;
     } catch (error) {
       lastSaveError = error instanceof Error ? error.message : "Unknown save error";
@@ -680,6 +694,7 @@ if (
   imageStage.addEventListener("pointerenter", (event) => {
     if (!imageReady || !maskLayers.active().visible) return;
     pointerInside = true;
+    postCacheInteraction(true);
     if (isBrushTool(activeTool)) {
       updateBrushCursor(event.clientX, event.clientY);
     } else {
@@ -702,6 +717,7 @@ if (
 
   imageStage.addEventListener("pointerleave", () => {
     pointerInside = false;
+    if (!activeStroke) postCacheInteraction(false);
     latestPointer = null;
     hoverPoint = null;
     removeHoverMarker();
@@ -786,6 +802,7 @@ if (
     imageStage.releasePointerCapture?.(event.pointerId);
     activeStroke = null;
     markDirty();
+    if (!pointerInside) postCacheInteraction(false);
   }
 
   function postBrush(
@@ -888,6 +905,7 @@ if (
       folder.images.find(({ path }) => path === preferredImagePath) ??
       folder.images[0] ??
       null;
+    void prioritizeCache(folder.path, image?.id);
 
     if (image) {
       selectImage(image);
@@ -920,6 +938,7 @@ if (
     latestPointer = null;
     encodeMetric.textContent = "—";
     decodeMetric.textContent = "—";
+    if (currentFolder) void prioritizeCache(currentFolder.path, image.id);
     setDataImage(image);
     renderDataBrowser();
     renderMarkers();
@@ -1078,12 +1097,17 @@ if (
     selectedClassId = Number(button.dataset.classId);
     renderMaskPicker();
   });
+  setupClassSearch.addEventListener("input", renderMaskPicker);
+  maskingClassSearch.addEventListener("input", renderMaskPicker);
+  statisticsClassSearch.addEventListener("input", () => {
+    if (statisticsSnapshot) renderStatisticsRows(statisticsSnapshot.classes);
+  });
   statisticsList.addEventListener("click", (event) => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-statistics-class]");
     if (!button || !statisticsSnapshot) return;
     selectedStatisticsClassId = Number(button.dataset.statisticsClass);
     renderStatisticsRows(statisticsSnapshot.classes);
-    renderStatisticsPreviews(statisticsSnapshot.previews, selectedStatisticsClassId);
+    void refreshStatisticsPreviews(selectedStatisticsClassId);
   });
 
   addMaskButton.addEventListener("click", () => {
@@ -1167,7 +1191,7 @@ if (
     if (!response.ok) { window.alert((await responseErrorFromFetch(response)).message); return; }
     const category = await response.json() as Category;
     categories.push(category);
-    touchClass(category.id);
+    promoteClass(category.id);
     selectedClassId = category.id;
     renderMaskPicker();
   }
@@ -1323,9 +1347,20 @@ if (
   }
 }
 
+function postCacheInteraction(active: boolean): void {
+  void fetch("/api/cache/interaction", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ active }), keepalive: true }).catch(() => undefined);
+}
+
+async function prioritizeCache(folderPath: string, imageId?: string): Promise<void> {
+  try {
+    await fetch("/api/cache/prioritize", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ folderPath, imageId }) });
+  } catch { /* Image preparation will retry when the service becomes ready. */ }
+}
+
 function renderStatisticsRows(classes: Array<Category & { annotationCount: number }>): void {
   statisticsList.replaceChildren();
-  for (const category of classes) {
+  const query = statisticsClassSearch.value.trim().toLocaleLowerCase();
+  for (const category of classes.filter((item) => item.name.toLocaleLowerCase().includes(query))) {
     const row = document.createElement("button");
     row.type = "button";
     row.className = "statistics-row";
@@ -1346,44 +1381,71 @@ function renderStatisticsRows(classes: Array<Category & { annotationCount: numbe
   if (classes.length === 0) statisticsList.textContent = "No classes have been defined yet.";
 }
 
-function renderStatisticsPreviews(previews: StatisticsPreview[], categoryId: number | null): void {
+function renderStatisticsPreviews(previews: StatisticsPreview[]): void {
   statisticsPreviewGrid.replaceChildren();
-  const matching = categoryId === null ? [] : previews.filter((preview) => preview.categoryIds.includes(categoryId));
-  // Keep the overview scannable; the matching class can have many annotated images.
-  for (const preview of matching.slice(0, 8)) {
+  for (const preview of previews.slice(0, 8)) {
     const card = document.createElement("figure");
     card.className = "statistics-preview-card";
     const image = document.createElement("img");
-    image.src = "/api/statistics/previews/" + encodeURIComponent(preview.imageId) + "?category_id=" + String(categoryId);
+    image.src = preview.previewUrl;
+    image.loading = "lazy";
+    image.decoding = "async";
     image.alt = preview.fileName + " with selected class overlay";
     const caption = document.createElement("figcaption");
     caption.textContent = preview.fileName;
     card.append(image, caption);
     statisticsPreviewGrid.append(card);
   }
-  if (matching.length === 0) statisticsPreviewGrid.textContent = "No saved previews for this class.";
+  if (previews.length === 0) statisticsPreviewGrid.textContent = "No saved previews for this class.";
 }
 
-async function refreshStatistics(): Promise<void> {
-  statisticsTotal.textContent = "Refreshing saved annotations…";
-  statisticsList.replaceChildren();
+async function refreshStatisticsPreviews(categoryId: number | null): Promise<void> {
+  previewController?.abort();
+  statisticsPreviewGrid.replaceChildren();
+  if (categoryId === null || activeSidebarTab !== "statistics") return;
+  statisticsPreviewGrid.textContent = "Loading up to 8 previews…";
+  const controller = new AbortController();
+  previewController = controller;
   try {
-    const response = await fetch("/api/statistics", { cache: "no-store" });
+    const response = await fetch(`/api/statistics/classes/${categoryId}/previews?limit=8`, { signal: controller.signal });
+    if (!response.ok) throw await responseErrorFromFetch(response);
+    const result = await response.json() as { previews: StatisticsPreview[] };
+    if (previewController === controller && selectedStatisticsClassId === categoryId) renderStatisticsPreviews(result.previews);
+  } catch (error) {
+    if (!(error instanceof DOMException && error.name === "AbortError")) statisticsPreviewGrid.textContent = error instanceof Error ? error.message : String(error);
+  }
+}
+
+async function refreshStatistics(render = true): Promise<void> {
+  statisticsController?.abort();
+  const controller = new AbortController();
+  statisticsController = controller;
+  if (render) {
+    statisticsTotal.textContent = "Refreshing saved annotations…";
+    statisticsList.replaceChildren();
+  }
+  try {
+    const response = await fetch("/api/statistics", { cache: "no-store", signal: controller.signal });
     if (!response.ok) throw await responseErrorFromFetch(response);
     const statistics = await response.json() as ClassStatistics;
     const classes = [...statistics.classes].sort((left, right) =>
-      right.annotationCount - left.annotationCount || left.name.localeCompare(right.name),
-    );
+      right.annotationCount - left.annotationCount || left.name.localeCompare(right.name));
+    statisticsSnapshot = { ...statistics, classes };
+    if (!render || activeSidebarTab !== "statistics" || statisticsController !== controller) return;
     statisticsTotal.textContent = statistics.totalAnnotations === 1
       ? "1 saved annotation"
       : String(statistics.totalAnnotations) + " saved annotations";
-    statisticsSnapshot = { ...statistics, classes };
-    selectedStatisticsClassId = classes[0]?.id ?? null;
+    selectedStatisticsClassId = classes.some((item) => item.id === selectedStatisticsClassId)
+      ? selectedStatisticsClassId
+      : classes[0]?.id ?? null;
     renderStatisticsRows(classes);
-    renderStatisticsPreviews(statistics.previews ?? [], selectedStatisticsClassId);
+    void refreshStatisticsPreviews(selectedStatisticsClassId);
   } catch (error) {
-    statisticsTotal.textContent = "Statistics unavailable";
-    statisticsList.textContent = error instanceof Error ? error.message : String(error);
+    if (error instanceof DOMException && error.name === "AbortError") return;
+    if (render) {
+      statisticsTotal.textContent = "Statistics unavailable";
+      statisticsList.textContent = error instanceof Error ? error.message : String(error);
+    }
   }
 }
 
@@ -1415,7 +1477,8 @@ function setSidebarTab(tab: "setup" | "masking" | "statistics"): void {
   });
   panels.forEach(([panel, value]) => { panel.hidden = value !== tab; });
   setStatisticsViewer(tab === "statistics");
-  if (tab === "statistics") void refreshStatistics();
+  if (tab === "statistics") { postCacheInteraction(false); void refreshStatistics(); }
+  else { statisticsController?.abort(); previewController?.abort(); statisticsPreviewGrid.replaceChildren(); }
 }
 
 function setTool(tool: ActiveTool): void {
@@ -1548,11 +1611,11 @@ function renderMaskPicker(): void {
   selectedClassId = selectedCategory.id;
   maskLayerName.value = selectedCategory.name;
   maskLayerColor.value = selectedCategory.color;
-  renderClassList(newMaskClass, activeCategories(), active.categoryId);
+  renderClassList(newMaskClass, filterClasses(activeCategories(), maskingClassSearch.value), active.categoryId);
   newMaskClass.dataset.selected = String(active.categoryId);
   renderClassList(
     setupClassList,
-    categories.filter((category) => category.active || category.id === selectedClassId),
+    filterClasses(categories.filter((category) => category.active || category.id === selectedClassId), setupClassSearch.value),
     selectedClassId,
   );
   archiveClassButton.disabled = !selectedCategory.active;
@@ -1591,8 +1654,18 @@ function renderMaskPicker(): void {
 }
 
 function touchClass(categoryId: number): void {
+  if (lastTouchedClassId === categoryId) promoteClass(categoryId);
+  lastTouchedClassId = categoryId;
+}
+
+function promoteClass(categoryId: number): void {
   classUsageTick += 1;
   classLastUsed.set(categoryId, classUsageTick);
+}
+
+function filterClasses(values: Category[], query: string): Category[] {
+  const normalized = query.trim().toLocaleLowerCase();
+  return normalized ? values.filter((category) => category.name.toLocaleLowerCase().includes(normalized)) : values;
 }
 
 function orderClasses(values: Category[]): Category[] {

@@ -124,13 +124,14 @@ describe("browser UI with a mocked inference worker", () => {
         body = {
           totalAnnotations: 3,
           classes: [{ ...category, annotationCount: 3 }],
-          previews: Array.from({ length: 10 }, (_, index) => ({
-            imageId: "train-" + index,
-            fileName: "train/train-" + index + ".png",
-            annotationCount: 3,
-            categoryIds: [1],
-          })),
         };
+      } else if (url.startsWith("/api/statistics/classes/1/previews")) {
+        body = { previews: Array.from({ length: 8 }, (_, index) => ({
+          imageId: "train-" + index,
+          fileName: "train/train-" + index + ".png",
+          annotationCount: 1, savedAt: "2026-01-01",
+          previewUrl: "/api/statistics/previews/train-" + index + "?category_id=1&v=test",
+        })) };
       } else if (/\/api\/classes\/1$/.test(url) && init?.method === "PATCH") {
         category = { ...category, ...JSON.parse(String(init.body)) };
         body = category;

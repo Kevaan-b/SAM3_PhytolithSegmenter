@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,7 @@ import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import load_file, save_file
 
+FINGERPRINT_SCHEMA = 1
 CACHE_SCHEMA = "samotator-embedding-v1"
 EMBEDDING_KEYS = (
     "image_embeddings.0",
@@ -203,3 +205,83 @@ class ByteLru(Generic[T]):
 
     def __len__(self) -> int:
         return len(self._items)
+
+
+class ImageFingerprintIndex:
+    """Persist cache keys so unchanged images are not rehashed at startup."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.lock = threading.RLock()
+        self.document = self._load()
+        self._save_timer: threading.Timer | None = None
+
+    def cached_key(self, relative_path: str, image_path: Path, model: str) -> str | None:
+        stat = image_path.stat()
+        with self.lock:
+            item = self.document["images"].get(relative_path)
+            if not item or item.get("model") != model:
+                return None
+            if item.get("size") != stat.st_size or item.get("mtimeNs") != stat.st_mtime_ns:
+                return None
+            value = item.get("cacheKey")
+            return value if isinstance(value, str) and len(value) == 64 else None
+
+    def resolve_key(self, relative_path: str, image_path: Path, model: str) -> str:
+        value = self.cached_key(relative_path, image_path, model)
+        if value:
+            return value
+        value = cache_key(image_path, model)
+        stat = image_path.stat()
+        with self.lock:
+            self.document["images"][relative_path] = {
+                "size": stat.st_size, "mtimeNs": stat.st_mtime_ns,
+                "model": model, "cacheKey": value,
+            }
+            self._schedule_save()
+        return value
+
+    def remove_missing(self, paths: set[str]) -> None:
+        with self.lock:
+            changed = False
+            for value in list(self.document["images"]):
+                if value not in paths:
+                    del self.document["images"][value]
+                    changed = True
+            if changed:
+                self._schedule_save()
+
+    def flush(self) -> None:
+        with self.lock:
+            if self._save_timer:
+                self._save_timer.cancel()
+                self._save_timer = None
+            self._save()
+
+    def _schedule_save(self) -> None:
+        if self._save_timer and self._save_timer.is_alive():
+            return
+        self._save_timer = threading.Timer(0.5, self._flush_timer)
+        self._save_timer.daemon = True
+        self._save_timer.start()
+
+    def _flush_timer(self) -> None:
+        with self.lock:
+            self._save_timer = None
+            self._save()
+
+    def _load(self) -> dict:
+        if self.path.is_file():
+            try:
+                value = json.loads(self.path.read_text(encoding="utf-8"))
+                if value.get("schemaVersion") == FINGERPRINT_SCHEMA and isinstance(value.get("images"), dict):
+                    return value
+            except (OSError, ValueError):
+                pass
+        return {"schemaVersion": FINGERPRINT_SCHEMA, "images": {}}
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(self.document, separators=(",", ":")), encoding="utf-8")
+        os.replace(temporary, self.path)

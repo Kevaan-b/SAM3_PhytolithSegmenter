@@ -156,6 +156,9 @@ export type WorkerToMainMessage =
       total: number;
       gpuResident: number;
       queueDepth: number;
+      currentJob: string | null;
+      backgroundPaused: boolean;
+      activeFolder: { path: string; ready: number; total: number };
     }
   | {
       type: "edit-state";

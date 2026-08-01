@@ -5,6 +5,7 @@ import numpy as np
 from server.cache import (
     EMBEDDING_KEYS,
     EXPECTED_SHAPES,
+    ImageFingerprintIndex,
     ByteLru,
     cache_file_is_valid,
     cache_key,
@@ -61,3 +62,16 @@ def test_manifest_is_recursive_and_ignores_symlinks(tmp_path: Path):
     assert found["url"] == "/data/train/nested/sample.png"
     assert len(records) == 1
     assert [folder["name"] for folder in tree["folders"]] == ["train"]
+
+
+def test_fingerprint_index_reuses_unchanged_content_key(tmp_path: Path):
+    image = tmp_path / "image.png"
+    image.write_bytes(b"content")
+    catalog = ImageFingerprintIndex(tmp_path / "fingerprints.json")
+    key = catalog.resolve_key("train/image.png", image, "model")
+    assert catalog.cached_key("train/image.png", image, "model") == key
+    catalog.flush()
+    reloaded = ImageFingerprintIndex(tmp_path / "fingerprints.json")
+    assert reloaded.cached_key("train/image.png", image, "model") == key
+    image.write_bytes(b"changed-content")
+    assert reloaded.cached_key("train/image.png", image, "model") is None

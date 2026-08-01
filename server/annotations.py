@@ -11,15 +11,15 @@ from typing import Callable
 
 import numpy as np
 from PIL import Image
-from pycocotools import mask as coco_mask
 
+from .annotation_index import AnnotationIndex, CocoExporter
 from .manifest import ImageRecord
 
 PALETTE = ["#4094dc", "#e06b65", "#34a66f", "#9b72cf", "#e29a3b", "#26a6a1", "#d767a7", "#7f8f3f"]
 
 
 class AnnotationStore:
-    def __init__(self, data_root: Path, get_record: Callable[[str], ImageRecord]) -> None:
+    def __init__(self, data_root: Path, get_record: Callable[[str], ImageRecord], cache_root: Path | None = None) -> None:
         self.data_root = data_root.resolve()
         self.get_record = get_record
         self.metadata_root = self.data_root / "metadata"
@@ -29,73 +29,99 @@ class AnnotationStore:
         self.categories_path = self.metadata_root / "categories.json"
         self.ids_path = self.internal_root / "ids.json"
         self.lock = threading.RLock()
+        cache = cache_root or self.data_root.parent / ".samotator-cache"
+        self.preview_root = cache / "previews"
+        self.preview_lock = threading.RLock()
+        self.index = AnnotationIndex(cache / "annotations.sqlite3", self.draft_root)
+        self.exporter = CocoExporter(self.index, self.output_root, lambda: self._read_categories()["categories"])
+
+    def initialize(self) -> None:
+        changed_splits = self.index.reconcile()
+        for split in changed_splits:
+            self.exporter.schedule(split)
+
+    def set_interactive(self, active: bool) -> None:
+        self.exporter.set_interactive(active)
+
+    def shutdown(self) -> None:
+        self.exporter.stop()
+
+    def flush_exports(self) -> None:
+        self.exporter.flush()
 
     def categories(self) -> dict:
         with self.lock:
             return self._read_categories()
 
     def statistics(self) -> dict:
-        """Return saved COCO instance counts for every defined category."""
-        with self.lock:
-            document = self._read_categories()
-            counts = {int(category["id"]): 0 for category in document["categories"]}
-            for path in sorted(self.output_root.glob("instances*.json")):
-                output = self._read_json(path)
-                for annotation in output.get("annotations", []):
-                    identifier = int(annotation.get("category_id", 0))
-                    if identifier in counts:
-                        counts[identifier] += 1
-            previews = []
-            for draft in sorted(self._drafts(), key=lambda item: item.get("savedAt", ""), reverse=True):
-                width, height = int(draft["width"]), int(draft["height"])
-                category_ids = sorted({
-                    int(layer["categoryId"])
-                    for layer in draft["layers"]
-                    if self._mask_area(layer["effectiveMask"], width, height) > 0
-                })
-                annotation_count = len(category_ids)
-                if annotation_count:
-                    previews.append({
-                        "imageId": draft["imageId"],
-                        "fileName": draft["file_name"],
-                        "annotationCount": annotation_count,
-                        "categoryIds": category_ids,
-                    })
-            return {
-                "totalAnnotations": sum(counts.values()),
-                "classes": [
-                    {**category, "annotationCount": counts[int(category["id"])]}
-                    for category in document["categories"]
-                ],
-                "previews": previews[:12],
-            }
+        """Return indexed saved-instance counts without expanding any masks."""
+        return self.index.statistics(self._read_categories()["categories"])
+
+    def statistics_previews(self, category_id: int, limit: int = 8) -> list[dict]:
+        category = self._category(self._read_categories(), category_id)
+        items = self.index.previews(category_id, limit)
+        for item in items:
+            version = self._preview_version(item["imageId"], category_id, category["color"])
+            item["previewUrl"] = f"/api/statistics/previews/{item['imageId']}?category_id={category_id}&v={version}"
+        return items
+
+    def _preview_version(self, image_id: str, category_id: int, color: str) -> str:
+        import hashlib
+        record = self.get_record(image_id)
+        stat = record.absolute_path.stat()
+        base = self.index.image_version(image_id, category_id, color)
+        return hashlib.sha256(f"{base}:{stat.st_size}:{stat.st_mtime_ns}".encode()).hexdigest()[:16]
 
     def preview_image(self, image_id: str, category_id: int | None = None) -> bytes:
+        with self.preview_lock:
+            return self._preview_image_unlocked(image_id, category_id)
+
+    def _preview_image_unlocked(self, image_id: str, category_id: int | None = None) -> bytes:
         record = self.get_record(image_id)
-        with self.lock:
-            draft = self.load_image(image_id)
-            if not draft["layers"]:
-                raise ValueError("No saved annotations exist for this image.")
-            width, height = int(draft["width"]), int(draft["height"])
-            categories = {int(category["id"]): category for category in self._read_categories()["categories"]}
-            with Image.open(record.absolute_path) as source:
-                image = source.convert("RGBA")
-            for layer in draft["layers"]:
-                if category_id is not None and int(layer["categoryId"]) != category_id:
-                    continue
-                mask = self._unpack(layer["effectiveMask"], width, height)
-                if not mask.any():
-                    continue
-                color = categories.get(int(layer["categoryId"]), {}).get("color", "#8a8a8a")
-                rgb = tuple(int(color[index:index + 2], 16) for index in (1, 3, 5))
-                alpha = Image.fromarray(mask.astype(np.uint8) * 120, mode="L")
-                overlay = Image.new("RGBA", image.size, (*rgb, 0))
-                overlay.putalpha(alpha)
-                image = Image.alpha_composite(image, overlay)
-            image.thumbnail((760, 760))
-            output = BytesIO()
-            image.save(output, format="PNG")
-            return output.getvalue()
+        draft = self.load_image(image_id)
+        if not draft["layers"]:
+            raise ValueError("No saved annotations exist for this image.")
+        categories = {int(item["id"]): item for item in self._read_categories()["categories"]}
+        selected = category_id if category_id is not None else int(draft["layers"][0]["categoryId"])
+        category = categories.get(selected)
+        if not category:
+            raise ValueError("Unknown preview category.")
+        version = self._preview_version(image_id, selected, category["color"])
+        destination = self.preview_root / f"{image_id}-{selected}-{version}.webp"
+        if destination.is_file():
+            return destination.read_bytes()
+        with self.preview_lock:
+            if destination.is_file():
+                return destination.read_bytes()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            stat = record.absolute_path.stat()
+            source_key = f"{image_id}-{stat.st_size}-{stat.st_mtime_ns}.webp"
+            source_path = self.preview_root / "sources" / source_key
+            if source_path.is_file():
+                with Image.open(source_path) as cached_source:
+                    image = cached_source.convert("RGBA")
+            else:
+                with Image.open(record.absolute_path) as source:
+                    image = source.convert("RGBA")
+                    image.thumbnail((320, 320))
+                source_path.parent.mkdir(parents=True, exist_ok=True)
+                image.convert("RGB").save(source_path, format="WEBP", quality=82, method=4)
+        width, height = int(draft["width"]), int(draft["height"])
+        rgb = tuple(int(category["color"][index:index + 2], 16) for index in (1, 3, 5))
+        for layer in draft["layers"]:
+            if int(layer["categoryId"]) != selected:
+                continue
+            mask = Image.fromarray(self._unpack(layer["effectiveMask"], width, height).astype(np.uint8) * 120, mode="L")
+            mask = mask.resize(image.size, Image.Resampling.NEAREST)
+            overlay = Image.new("RGBA", image.size, (*rgb, 0))
+            overlay.putalpha(mask)
+            image = Image.alpha_composite(image, overlay)
+        output = BytesIO()
+        image.convert("RGB").save(output, format="WEBP", quality=82, method=4)
+        temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+        temporary.write_bytes(output.getvalue())
+        os.replace(temporary, destination)
+        return output.getvalue()
 
     def add_category(self, name: str, supercategory: str = "phytolith", color: str | None = None) -> dict:
         with self.lock:
@@ -112,7 +138,8 @@ class AnnotationStore:
             document["next_category_id"] = identifier + 1
             document["categories"].append(category)
             self._write_json(self.categories_path, document)
-            self._rebuild_all(document)
+            for split in self.index.splits():
+                self.exporter.schedule(split)
             return category
 
     def update_category(self, identifier: int, changes: dict) -> dict:
@@ -128,7 +155,8 @@ class AnnotationStore:
             if "active" in changes:
                 category["active"] = bool(changes["active"])
             self._write_json(self.categories_path, document)
-            self._rebuild_all(document)
+            for split in self.index.splits():
+                self.exporter.schedule(split)
             return category
 
     def archive_category(self, identifier: int) -> dict:
@@ -190,8 +218,10 @@ class AnnotationStore:
         }
         with self.lock:
             self._write_json(self.ids_path, ids)
-            self._write_json(self.draft_root / f"{image_id}.json", draft)
-            self._rebuild_split(self._split(record.relative_path), categories)
+            draft_path = self.draft_root / f"{image_id}.json"
+            self._write_json(draft_path, draft)
+            self.index.upsert(draft)
+            self.exporter.schedule(self._split(record.relative_path))
         nonempty = sum(self._mask_area(item["effectiveMask"], width, height) > 0 for item in saved_layers)
         return {"imageId": image_id, "savedLayers": nonempty, "emptyLayers": len(saved_layers) - nonempty, "savedAt": draft["savedAt"]}
 
@@ -226,62 +256,12 @@ class AnnotationStore:
             ids["nextAnnotationId"] += 1
         return int(ids["annotations"][layer_id])
 
-    def _rebuild_all(self, categories: dict) -> None:
-        for split in {self._split(draft.get("file_name", "")) for draft in self._drafts()}:
-            self._rebuild_split(split, categories)
-
-    def _rebuild_split(self, split: str, categories: dict) -> None:
-        images: list[dict] = []
-        annotations: list[dict] = []
-        for draft in self._drafts():
-            if self._split(draft["file_name"]) != split:
-                continue
-            width, height = int(draft["width"]), int(draft["height"])
-            image_number = int(draft["imageNumber"])
-            images.append({"id": image_number, "file_name": self._coco_file_name(draft["file_name"]), "width": width, "height": height})
-            for layer in draft["layers"]:
-                binary = self._unpack(layer["effectiveMask"], width, height)
-                if not binary.any():
-                    continue
-                encoded = coco_mask.encode(np.asfortranarray(binary.astype(np.uint8)))
-                annotations.append({
-                    "id": int(layer["annotationId"]),
-                    "image_id": image_number,
-                    "category_id": int(layer["categoryId"]),
-                    "bbox": [float(value) for value in coco_mask.toBbox(encoded).tolist()],
-                    "segmentation": {"size": [height, width], "counts": encoded["counts"].decode("ascii")},
-                    "area": int(coco_mask.area(encoded)),
-                    "iscrowd": 0,
-                })
-        output = {
-            "info": {"description": "Samotator COCO instance segmentation dataset", "version": "1.0", "year": datetime.now(UTC).year},
-            "licenses": [],
-            "images": sorted(images, key=lambda item: item["id"]),
-            "annotations": sorted(annotations, key=lambda item: item["id"]),
-            "categories": [
-                {"id": int(item["id"]), "name": item["name"], "supercategory": item.get("supercategory", "")}
-                for item in sorted(categories["categories"], key=lambda item: int(item["id"]))
-            ],
-        }
-        name = "instances.json" if split == "default" else f"instances_{split}.json"
-        self._write_json(self.output_root / name, output)
-
-    def _drafts(self) -> list[dict]:
-        if not self.draft_root.exists():
-            return []
-        return [self._read_json(path) for path in sorted(self.draft_root.glob("*.json"))]
-
     @staticmethod
     def _split(path: str) -> str:
         parts = Path(path).parts
         if parts and parts[0] == "images":
             parts = parts[1:]
         return parts[0] if parts and parts[0] in {"train", "val", "test"} else "default"
-
-    @staticmethod
-    def _coco_file_name(path: str) -> str:
-        parts = Path(path).parts
-        return Path(*parts[1:]).as_posix() if parts and parts[0] == "images" else Path(*parts).as_posix()
 
     @staticmethod
     def _decode_mask(value: str, expected: int) -> bytes:
