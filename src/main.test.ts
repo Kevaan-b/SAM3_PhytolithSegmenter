@@ -126,12 +126,23 @@ describe("browser UI with a mocked inference worker", () => {
           classes: [{ ...category, annotationCount: 3 }],
         };
       } else if (url.startsWith("/api/statistics/classes/1/previews")) {
-        body = { previews: Array.from({ length: 8 }, (_, index) => ({
-          imageId: "train-" + index,
-          fileName: "train/train-" + index + ".png",
-          annotationCount: 1, savedAt: "2026-01-01",
-          previewUrl: "/api/statistics/previews/train-" + index + "?category_id=1&v=test",
-        })) };
+        const page = Number(new URL(url, "http://test").searchParams.get("page") ?? "1");
+        const totalImages = 18;
+        const pageSize = 8;
+        const start = (page - 1) * pageSize;
+        body = {
+          previews: Array.from({ length: Math.min(pageSize, totalImages - start) }, (_, index) => ({
+            imageId: start + index === 0 ? "train-a" : start + index === 1 ? "train-b" : "train-" + (start + index),
+            fileName: "train/train-" + (start + index) + ".png",
+            annotationCount: 1,
+            savedAt: "2026-01-01",
+            previewUrl: "/api/statistics/previews/train-" + (start + index) + "?category_id=1&v=test",
+          })),
+          page,
+          pageSize,
+          totalImages,
+          totalPages: 3,
+        };
       } else if (/\/api\/classes\/1$/.test(url) && init?.method === "PATCH") {
         category = { ...category, ...JSON.parse(String(init.body)) };
         body = category;
@@ -191,6 +202,38 @@ describe("browser UI with a mocked inference worker", () => {
       expect(document.querySelector(".statistics-row strong")?.textContent).toBe("object");
       expect(document.querySelectorAll(".statistics-preview-card")).toHaveLength(8);
     });
+    expect(document.querySelector("#statistics-image-counter")?.textContent).toBe("Images 1–8 of 18");
+    expect(document.querySelector("#statistics-page-counter")?.textContent).toBe("Page 1 of 3 · 2 remaining");
+    document.querySelectorAll<HTMLButtonElement>(".statistics-preview-card")[1]!.click();
+    await vi.waitFor(() => {
+      expect(maskingTab.getAttribute("aria-selected")).toBe("true");
+      expect(statisticsPanel.hidden).toBe(true);
+    });
+    expect([...worker.messages].reverse().find((message) => message.type === "load-image")).toMatchObject({
+      type: "load-image",
+      imageId: "train-b",
+    });
+    statisticsTab.click();
+    await vi.waitFor(() => expect(document.querySelectorAll(".statistics-preview-card")).toHaveLength(8));
+    const nextPage = document.querySelector<HTMLButtonElement>("#statistics-next-page")!;
+    const previousPage = document.querySelector<HTMLButtonElement>("#statistics-previous-page")!;
+    expect(previousPage.disabled).toBe(true);
+    nextPage.click();
+    await vi.waitFor(() => {
+      expect(document.querySelector("#statistics-image-counter")?.textContent).toBe("Images 9–16 of 18");
+      expect(document.querySelector("#statistics-page-counter")?.textContent).toBe("Page 2 of 3 · 1 remaining");
+    });
+    expect(previousPage.disabled).toBe(false);
+    expect(vi.mocked(fetch).mock.calls.some(([url]) =>
+      String(url).includes("/api/statistics/classes/1/previews?page=2")
+    )).toBe(true);
+    maskingTab.click();
+    statisticsTab.click();
+    await vi.waitFor(() => {
+      expect(document.querySelector("#statistics-image-counter")?.textContent).toBe("Images 9–16 of 18");
+      expect(document.querySelector("#statistics-page-counter")?.textContent).toBe("Page 2 of 3 · 1 remaining");
+    });
+
     setupTab.click();
     expect(setupPanel.hidden).toBe(false);
     expect(maskingPanel.hidden).toBe(true);
@@ -289,6 +332,19 @@ describe("browser UI with a mocked inference worker", () => {
       type: "decode",
       points: [{ x: 0.5, y: 0.5, label: 1 }],
     });
+    stage.dispatchEvent(new MouseEvent("pointerleave", { bubbles: true }));
+    expect(worker.messages.at(-1)).toMatchObject({
+      type: "cancel-preview",
+      layerId: latestLoad.activeLayerId,
+    });
+    stage.dispatchEvent(
+      new MouseEvent("pointerenter", {
+        bubbles: true,
+        clientX: 110,
+        clientY: 70,
+      }),
+    );
+    await Promise.resolve();
 
     document.querySelector<HTMLButtonElement>("#negative-tool")!.click();
     expect(worker.messages.at(-1)).toMatchObject({

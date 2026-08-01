@@ -100,14 +100,27 @@ class AnnotationIndex:
         return {"totalAnnotations": sum(counts.values()), "classes": [
             {**category, "annotationCount": counts.get(int(category["id"]), 0)} for category in categories]}
 
-    def previews(self, category_id: int, limit: int) -> list[dict]:
+    def previews(self, category_id: int, page: int, page_size: int = 8) -> dict:
+        page_size = min(max(page_size, 1), 8)
         with self.lock, self._connect() as connection:
+            total = int(connection.execute(
+                "SELECT COUNT(DISTINCT image_id) FROM annotations WHERE category_id=?",
+                (category_id,),
+            ).fetchone()[0])
+            total_pages = (total + page_size - 1) // page_size
+            resolved_page = min(max(page, 1), max(total_pages, 1))
             rows = connection.execute("""SELECT i.image_id,i.file_name,i.saved_at,COUNT(a.annotation_id)
                 FROM images i JOIN annotations a ON a.image_id=i.image_id WHERE a.category_id=?
-                GROUP BY i.image_id ORDER BY i.saved_at DESC,i.image_id LIMIT ?""",
-                (category_id, min(max(limit, 1), 8))).fetchall()
-        return [{"imageId": row[0], "fileName": row[1], "savedAt": row[2],
-                 "annotationCount": int(row[3])} for row in rows]
+                GROUP BY i.image_id ORDER BY i.saved_at DESC,i.image_id LIMIT ? OFFSET ?""",
+                (category_id, page_size, (resolved_page - 1) * page_size)).fetchall()
+        return {
+            "previews": [{"imageId": row[0], "fileName": row[1], "savedAt": row[2],
+                "annotationCount": int(row[3])} for row in rows],
+            "page": resolved_page,
+            "pageSize": page_size,
+            "totalImages": total,
+            "totalPages": total_pages,
+        }
 
     def splits(self) -> list[str]:
         with self.lock, self._connect() as connection:

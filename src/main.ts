@@ -134,7 +134,15 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         </div>
 
         <div class="statistics-viewer" id="statistics-viewer" hidden>
-          <p class="statistics-viewer-hint">Saved masks are shown as color overlays.</p>
+          <p class="statistics-viewer-hint">Saved masks are shown as color overlays. Select an image to open it in Masking.</p>
+          <div class="statistics-pagination" id="statistics-pagination" hidden>
+            <span id="statistics-image-counter">Images 0 of 0</span>
+            <div class="statistics-page-controls">
+              <button id="statistics-previous-page" type="button">← Previous</button>
+              <span id="statistics-page-counter">Page 0 of 0</span>
+              <button id="statistics-next-page" type="button">Next →</button>
+            </div>
+          </div>
           <div class="statistics-preview-grid" id="statistics-preview-grid"></div>
         </div>
 
@@ -245,6 +253,11 @@ const pointCount = getElement<HTMLSpanElement>("point-count");
 const viewerTitle = getElement<HTMLHeadingElement>("viewer-title");
 const statisticsViewer = getElement<HTMLDivElement>("statistics-viewer");
 const statisticsPreviewGrid = getElement<HTMLDivElement>("statistics-preview-grid");
+const statisticsPagination = getElement<HTMLDivElement>("statistics-pagination");
+const statisticsImageCounter = getElement<HTMLSpanElement>("statistics-image-counter");
+const statisticsPageCounter = getElement<HTMLSpanElement>("statistics-page-counter");
+const statisticsPreviousPage = getElement<HTMLButtonElement>("statistics-previous-page");
+const statisticsNextPage = getElement<HTMLButtonElement>("statistics-next-page");
 const viewerFooter = getElement<HTMLElement>("viewer-footer");
 const statusChip = getElement<HTMLDivElement>("status-chip");
 const statusLabel = getElement<HTMLSpanElement>("status-label");
@@ -302,6 +315,8 @@ let statisticsSnapshot: ClassStatistics | null = null;
 let selectedStatisticsClassId: number | null = null;
 let statisticsController: AbortController | null = null;
 let previewController: AbortController | null = null;
+let statisticsPage = 1;
+let statisticsTotalPages = 0;
 let preventOverlap = false;
 let dirty = false;
 let annotationRevision = 0;
@@ -724,8 +739,14 @@ if (
     hideBrushCursor();
     if (isBrushTool(activeTool)) return;
     const layer = maskLayers.active();
-    layer.lastPromptKey = null;
-    submitPrompts(layer.pinnedPoints);
+    layer.stateRevision += 1;
+    layer.lastPromptKey = promptKey(layer.pinnedPoints);
+    postWorker({
+      type: "cancel-preview",
+      imageRevision,
+      layerId: layer.id,
+      stateRevision: layer.stateRevision,
+    });
   });
 
   imageStage.addEventListener("pointerdown", (event) => {
@@ -1106,8 +1127,37 @@ if (
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-statistics-class]");
     if (!button || !statisticsSnapshot) return;
     selectedStatisticsClassId = Number(button.dataset.statisticsClass);
+    statisticsPage = 1;
     renderStatisticsRows(statisticsSnapshot.classes);
     void refreshStatisticsPreviews(selectedStatisticsClassId);
+  });
+  statisticsPreviousPage.addEventListener("click", () => {
+    if (statisticsPage <= 1) return;
+    statisticsPage -= 1;
+    void refreshStatisticsPreviews(selectedStatisticsClassId, statisticsPage);
+  });
+  statisticsNextPage.addEventListener("click", () => {
+    if (statisticsPage >= statisticsTotalPages) return;
+    statisticsPage += 1;
+    void refreshStatisticsPreviews(selectedStatisticsClassId, statisticsPage);
+  });
+  statisticsPreviewGrid.addEventListener("click", (event) => {
+    const card = (event.target as HTMLElement).closest<HTMLElement>("[data-statistics-image]");
+    const imageId = card?.dataset.statisticsImage;
+    if (!imageId) return;
+    void (async () => {
+      const match = findStatisticsImage(imageId);
+      if (!match) {
+        showNotice("Image unavailable", "Rescan data/ if this image was recently moved.");
+        return;
+      }
+      if (dirty && !(await saveAnnotations())) return;
+      currentFolder = match.folder;
+      expandAncestors(match.folder.path);
+      void prioritizeCache(match.folder.path, match.image.id);
+      await selectImageAfterSave(match.image);
+      setSidebarTab("masking");
+    })();
   });
 
   addMaskButton.addEventListener("click", () => {
@@ -1384,14 +1434,18 @@ function renderStatisticsRows(classes: Array<Category & { annotationCount: numbe
 function renderStatisticsPreviews(previews: StatisticsPreview[]): void {
   statisticsPreviewGrid.replaceChildren();
   for (const preview of previews.slice(0, 8)) {
-    const card = document.createElement("figure");
+    const card = document.createElement("button");
+    card.type = "button";
     card.className = "statistics-preview-card";
+    card.dataset.statisticsImage = preview.imageId;
+    card.title = `Open ${preview.fileName} in Masking`;
     const image = document.createElement("img");
     image.src = preview.previewUrl;
     image.loading = "lazy";
     image.decoding = "async";
     image.alt = preview.fileName + " with selected class overlay";
-    const caption = document.createElement("figcaption");
+    const caption = document.createElement("span");
+    caption.className = "statistics-preview-caption";
     caption.textContent = preview.fileName;
     card.append(image, caption);
     statisticsPreviewGrid.append(card);
@@ -1399,18 +1453,47 @@ function renderStatisticsPreviews(previews: StatisticsPreview[]): void {
   if (previews.length === 0) statisticsPreviewGrid.textContent = "No saved previews for this class.";
 }
 
-async function refreshStatisticsPreviews(categoryId: number | null): Promise<void> {
+function findStatisticsImage(imageId: string): { folder: DataFolder; image: DataImage } | null {
+  if (!dataRoot) return null;
+  for (const folder of flattenFolders(dataRoot)) {
+    const image = folder.images.find((candidate) => candidate.id === imageId);
+    if (image) return { folder, image };
+  }
+  return null;
+}
+
+function renderStatisticsPagination(result: { page: number; pageSize: number; totalImages: number; totalPages: number; previews: StatisticsPreview[] }): void {
+  const start = result.totalImages === 0 ? 0 : (result.page - 1) * result.pageSize + 1;
+  const end = result.totalImages === 0 ? 0 : start + result.previews.length - 1;
+  statisticsImageCounter.textContent = result.totalImages === 1
+    ? "Image 1 of 1"
+    : `Images ${start}–${end} of ${result.totalImages}`;
+  const shownPage = result.totalPages === 0 ? 0 : result.page;
+  const remaining = Math.max(0, result.totalPages - shownPage);
+  statisticsPageCounter.textContent = `Page ${shownPage} of ${result.totalPages} · ${remaining} remaining`;
+  statisticsPreviousPage.disabled = shownPage <= 1;
+  statisticsNextPage.disabled = shownPage === 0 || shownPage >= result.totalPages;
+  statisticsPagination.hidden = false;
+}
+
+async function refreshStatisticsPreviews(categoryId: number | null, requestedPage = 1): Promise<void> {
   previewController?.abort();
   statisticsPreviewGrid.replaceChildren();
+  statisticsPagination.hidden = true;
   if (categoryId === null || activeSidebarTab !== "statistics") return;
   statisticsPreviewGrid.textContent = "Loading up to 8 previews…";
   const controller = new AbortController();
   previewController = controller;
   try {
-    const response = await fetch(`/api/statistics/classes/${categoryId}/previews?limit=8`, { signal: controller.signal });
+    const response = await fetch(`/api/statistics/classes/${categoryId}/previews?page=${requestedPage}`, { signal: controller.signal });
     if (!response.ok) throw await responseErrorFromFetch(response);
-    const result = await response.json() as { previews: StatisticsPreview[] };
-    if (previewController === controller && selectedStatisticsClassId === categoryId) renderStatisticsPreviews(result.previews);
+    const result = await response.json() as { previews: StatisticsPreview[]; page: number; pageSize: number; totalImages: number; totalPages: number };
+    if (previewController === controller && selectedStatisticsClassId === categoryId) {
+      statisticsPage = result.page;
+      statisticsTotalPages = result.totalPages;
+      renderStatisticsPreviews(result.previews);
+      renderStatisticsPagination(result);
+    }
   } catch (error) {
     if (!(error instanceof DOMException && error.name === "AbortError")) statisticsPreviewGrid.textContent = error instanceof Error ? error.message : String(error);
   }
@@ -1435,11 +1518,11 @@ async function refreshStatistics(render = true): Promise<void> {
     statisticsTotal.textContent = statistics.totalAnnotations === 1
       ? "1 saved annotation"
       : String(statistics.totalAnnotations) + " saved annotations";
-    selectedStatisticsClassId = classes.some((item) => item.id === selectedStatisticsClassId)
-      ? selectedStatisticsClassId
-      : classes[0]?.id ?? null;
+    const retainedClass = classes.some((item) => item.id === selectedStatisticsClassId);
+    selectedStatisticsClassId = retainedClass ? selectedStatisticsClassId : classes[0]?.id ?? null;
+    if (!retainedClass) statisticsPage = 1;
     renderStatisticsRows(classes);
-    void refreshStatisticsPreviews(selectedStatisticsClassId);
+    void refreshStatisticsPreviews(selectedStatisticsClassId, statisticsPage);
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") return;
     if (render) {
@@ -1478,7 +1561,7 @@ function setSidebarTab(tab: "setup" | "masking" | "statistics"): void {
   panels.forEach(([panel, value]) => { panel.hidden = value !== tab; });
   setStatisticsViewer(tab === "statistics");
   if (tab === "statistics") { postCacheInteraction(false); void refreshStatistics(); }
-  else { statisticsController?.abort(); previewController?.abort(); statisticsPreviewGrid.replaceChildren(); }
+  else { statisticsController?.abort(); previewController?.abort(); statisticsPreviewGrid.replaceChildren(); statisticsPagination.hidden = true; }
 }
 
 function setTool(tool: ActiveTool): void {

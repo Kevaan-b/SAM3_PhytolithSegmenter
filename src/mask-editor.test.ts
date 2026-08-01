@@ -53,6 +53,22 @@ describe("MaskEditor", () => {
     expect(enabled(editor.displayedMask(), 16)).toEqual([5, 15]);
   });
 
+  it("renders a committed reference mask with the current manual overrides", () => {
+    const editor = new MaskEditor();
+    editor.resetImage(4, 4);
+    const committed = packed(4, 4, [0, 1]);
+    editor.setBaseMask(committed);
+    editor.beginStroke("erase", 0.6, { x: 0, y: 0 });
+    editor.endStroke();
+    editor.beginStroke("add", 0.6, { x: 1, y: 1 });
+    editor.endStroke();
+    editor.setBaseMask(packed(4, 4, [5]));
+
+    expect(enabled(editor.displayedMask(), 16)).toEqual([5, 15]);
+    expect(enabled(editor.displayedMask(committed), 16)).toEqual([1, 15]);
+    expect(enabled(editor.baseMask(), 16)).toEqual([5]);
+  });
+
   it("inverts exactly and keeps brushes intuitive while inverted", () => {
     const editor = new MaskEditor();
     editor.resetImage(3, 3);

@@ -79,10 +79,11 @@ def test_statistics_counts_saved_annotations_by_class(tmp_path: Path):
     statistics = store.statistics()
     assert statistics["totalAnnotations"] == 2
     assert [item["annotationCount"] for item in statistics["classes"]] == [1, 1]
-    previews = store.statistics_previews(1)
-    assert len(previews) == 1
-    assert previews[0]["imageId"] == "image-a"
-    assert previews[0]["annotationCount"] == 1
+    preview_page = store.statistics_previews(1)
+    assert preview_page["totalImages"] == 1
+    assert preview_page["totalPages"] == 1
+    assert preview_page["previews"][0]["imageId"] == "image-a"
+    assert preview_page["previews"][0]["annotationCount"] == 1
     assert store.preview_image("image-a", 1).startswith(b"RIFF")
 
 
@@ -128,7 +129,13 @@ def test_statistics_preview_query_is_capped_at_eight(tmp_path: Path):
             "layerId": f"layer-{index}", "categoryId": 1,
             "rawMask": mask, "effectiveMask": mask,
         }], f"layer-{index}", False)
-    assert len(store.statistics_previews(1, 100)) == 8
+    first = store.statistics_previews(1, 1)
+    second = store.statistics_previews(1, 2)
+    assert len(first["previews"]) == 8
+    assert len(second["previews"]) == 2
+    assert first["totalImages"] == 10
+    assert first["totalPages"] == 2
+    assert second["page"] == 2
     assert store.statistics()["totalAnnotations"] == 10
     store.shutdown()
 

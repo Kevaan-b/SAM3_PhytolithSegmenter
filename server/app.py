@@ -121,9 +121,11 @@ def annotation_statistics():
 
 
 @app.get("/api/statistics/classes/{category_id}/previews")
-def annotation_statistics_previews(category_id: int, limit: int = 8):
+def annotation_statistics_previews(category_id: int, page: int = 1):
+    if page < 1:
+        raise HTTPException(status_code=400, detail="Page must be at least 1.")
     try:
-        return {"previews": annotations.statistics_previews(category_id, limit)}
+        return annotations.statistics_previews(category_id, page)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="Class not found.") from error
 

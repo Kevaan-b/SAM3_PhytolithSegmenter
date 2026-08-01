@@ -188,11 +188,14 @@ export class MaskEditor {
     }
   }
 
-  displayedMask(): Uint8Array {
+  displayedMask(base: Uint8Array = this.base): Uint8Array {
     this.requireDimensions();
+    if (base.byteLength !== this.base.byteLength) {
+      throw new Error("Base mask size does not match the current image.");
+    }
     const output = new Uint8Array(this.base.length);
     for (let index = 0; index < this.width * this.height; index += 1) {
-      if (this.displayedAt(index)) setBit(output, index, true);
+      if (this.displayedAt(index, base)) setBit(output, index, true);
     }
     return output;
   }
@@ -212,9 +215,9 @@ export class MaskEditor {
     }
   }
 
-  private displayedAt(index: number): boolean {
+  private displayedAt(index: number, base: Uint8Array = this.base): boolean {
     const raw =
-      (getBit(this.base, index) || getBit(this.forceOn, index)) &&
+      (getBit(base, index) || getBit(this.forceOn, index)) &&
       !getBit(this.forceOff, index);
     return this.inverted ? !raw : raw;
   }

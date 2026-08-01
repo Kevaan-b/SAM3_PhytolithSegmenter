@@ -988,6 +988,8 @@ button:focus-visible {
   background: rgba(29, 36, 32, 0.08);
 }
 
+.image-frame[hidden] { display: none; }
+
 .image-frame {
   position: relative;
   display: flex;
@@ -1744,13 +1746,21 @@ button:focus-visible {
   gap: 12px;
 }
 .statistics-preview-card {
+  padding: 0;
   min-width: 0;
   margin: 0;
   overflow: hidden;
+  color: inherit;
+  text-align: left;
   background: rgba(255, 255, 255, 0.42);
   border: 1px solid rgba(29, 36, 32, 0.13);
   border-radius: 5px;
+  cursor: pointer;
+  font: inherit;
+  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
 }
+.statistics-preview-card:hover { border-color: rgba(39, 133, 88, 0.52); transform: translateY(-1px); }
+.statistics-preview-card:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 .statistics-preview-card img {
   display: block;
   width: 100%;
@@ -1758,7 +1768,9 @@ button:focus-visible {
   object-fit: cover;
   background: #d4dbd3;
 }
-.statistics-preview-card figcaption {
+.statistics-preview-card figcaption,
+.statistics-preview-card .statistics-preview-caption {
+  display: block;
   padding: 7px 8px;
   overflow: hidden;
   color: #5b665e;
@@ -1766,4 +1778,39 @@ button:focus-visible {
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+
+.statistics-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 12px;
+  color: #647068;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.statistics-pagination[hidden] { display: none; }
+.statistics-page-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.statistics-page-controls button {
+  min-height: 30px;
+  padding: 0 10px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid rgba(29, 36, 32, 0.16);
+  border-radius: 4px;
+  font: inherit;
+  cursor: pointer;
+}
+.statistics-page-controls button:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+@media (max-width: 760px) {
+  .statistics-pagination { align-items: flex-start; flex-direction: column; }
 }

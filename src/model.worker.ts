@@ -2,7 +2,8 @@
 
 import type { LayerDescriptor, MainToWorkerMessage, WorkerToMainMessage } from "./protocol";
 import { MaskEditor } from "./mask-editor";
-import { compositeMasks, excludeOverlaps } from "./mask-compositor";
+import { compositeMasks, excludeOverlaps, outerMaskOutline } from "./mask-compositor";
+import { PromptDecodeQueue } from "./prompt-decode-queue";
 
 type LoadImageMessage = Extract<MainToWorkerMessage, { type: "load-image" }>;
 type DecodeMessage = Extract<MainToWorkerMessage, { type: "decode" }>;
@@ -18,10 +19,11 @@ let activeImageId: string | undefined;
 let activeImageRevision = -1;
 let desiredImageRevision = -1;
 let pendingImage: LoadImageMessage | undefined;
-let pendingDecode: DecodeMessage | undefined;
+const decodeQueue = new PromptDecodeQueue<DecodeMessage>();
 let pendingSnapshot: SnapshotMessage | undefined;
 let activePrepare: AbortController | undefined;
 const latestStateRevision = new Map<string, number>();
+const latestCommitRevision = new Map<string, number>();
 const maskLayers = new Map<string, WorkerLayer>();
 let activeLayerId = "";
 let latestMaskLayerId = "";
@@ -51,7 +53,7 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
       desiredImageRevision = data.imageRevision;
       preventOverlap = data.preventOverlap;
       pendingImage = data;
-      pendingDecode = undefined;
+      decodeQueue.clear();
       pendingSnapshot = undefined;
       latestStateRevision.clear();
       activePrepare?.abort();
@@ -62,7 +64,8 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
       const previous = latestStateRevision.get(data.layerId) ?? -1;
       if (data.stateRevision < previous) return;
       latestStateRevision.set(data.layerId, data.stateRevision);
-      pendingDecode = data;
+      if (!data.preview) latestCommitRevision.set(data.layerId, data.stateRevision);
+      decodeQueue.push(data);
       void pump();
       return;
     }
@@ -70,7 +73,8 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
       const previous = latestStateRevision.get(data.layerId) ?? -1;
       if (data.stateRevision < previous) return;
       latestStateRevision.set(data.layerId, data.stateRevision);
-      if (pendingDecode?.layerId === data.layerId) pendingDecode = undefined;
+      latestCommitRevision.set(data.layerId, data.stateRevision);
+      decodeQueue.clearMatching((message) => message.layerId === data.layerId);
       const layer = getLayer(data.layerId);
       latestMaskLayerId = data.layerId;
       layer.editor.clearMask();
@@ -149,11 +153,10 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
     }
     case "activate-layer": {
       if (data.imageRevision !== activeImageRevision) return;
-      const previous = maskLayers.get(activeLayerId);
-      if (previous) restoreLockedMask(previous);
-      const next = getLayer(data.layerId);
+      decodeQueue.clearPreview();
+      for (const layer of maskLayers.values()) restoreLockedMask(layer);
+      getLayer(data.layerId);
       activeLayerId = data.layerId;
-      restoreLockedMask(next);
       activeStrokeId = -1;
       activeStrokeLayerId = "";
       renderMasks();
@@ -164,6 +167,7 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
       if (data.imageRevision !== activeImageRevision) return;
       maskLayers.delete(data.layerId);
       latestStateRevision.delete(data.layerId);
+      latestCommitRevision.delete(data.layerId);
       if (activeLayerId === data.layerId) activeLayerId = maskLayers.keys().next().value ?? "";
       if (latestMaskLayerId === data.layerId) latestMaskLayerId = activeLayerId;
       renderMasks();
@@ -182,7 +186,7 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
       const previous = latestStateRevision.get(data.layerId) ?? -1;
       if (data.stateRevision < previous) return;
       latestStateRevision.set(data.layerId, data.stateRevision);
-      if (pendingDecode?.layerId === data.layerId && pendingDecode.preview) pendingDecode = undefined;
+      decodeQueue.clearPreview((message) => message.layerId === data.layerId);
       restoreLockedMask(getLayer(data.layerId));
       renderMasks();
       return;
@@ -226,15 +230,14 @@ async function pump(): Promise<void> {
   if (processing || !serviceReady) return;
   processing = true;
   try {
-    while (pendingImage || pendingDecode || pendingSnapshot) {
+    while (pendingImage || decodeQueue.hasPending() || pendingSnapshot) {
       if (pendingImage) {
         const next = pendingImage;
         pendingImage = undefined;
-        pendingDecode = undefined;
+        decodeQueue.clear();
         await loadImage(next);
-      } else if (pendingDecode) {
-        const next = pendingDecode;
-        pendingDecode = undefined;
+      } else if (decodeQueue.hasPending()) {
+        const next = decodeQueue.take()!;
         await decode(next);
       } else if (pendingSnapshot) {
         const next = pendingSnapshot;
@@ -244,7 +247,7 @@ async function pump(): Promise<void> {
     }
   } finally {
     processing = false;
-    if (pendingImage || pendingDecode || pendingSnapshot) void pump();
+    if (pendingImage || decodeQueue.hasPending() || pendingSnapshot) void pump();
   }
 }
 
@@ -307,7 +310,9 @@ async function decode(message: DecodeMessage): Promise<void> {
     const current =
       imageRevision === activeImageRevision &&
       imageRevision === desiredImageRevision &&
-      stateRevision === latestStateRevision.get(message.layerId) &&
+      stateRevision === (message.preview
+        ? latestStateRevision.get(message.layerId)
+        : latestCommitRevision.get(message.layerId)) &&
       maskLayers.has(message.layerId) &&
       (!message.preview || (activeLayerId === message.layerId && getLayer(message.layerId).visible));
     if (current) drawMask(mask, width, height, message.layerId, message.preview);
@@ -333,6 +338,7 @@ function prepareOverlay(
   canvas.height = height;
   maskLayers.clear();
   latestStateRevision.clear();
+  latestCommitRevision.clear();
   layers.forEach((layer) => createWorkerLayer(layer, width, height));
   if (!maskLayers.has(nextActiveLayerId)) throw new Error("The active mask layer is missing.");
   activeLayerId = nextActiveLayerId;
@@ -399,12 +405,19 @@ function renderMasks(): void {
   if (!context || !pixels || !canvas) return;
   const displayed = new Map<string, Uint8Array>();
   for (const layer of maskLayers.values()) displayed.set(layer.id, layer.editor.displayedMask());
+  const active = maskLayers.get(activeLayerId);
+  let committedReference = active?.previewing && active.lockedMask
+    ? active.editor.displayedMask(active.lockedMask)
+    : undefined;
   if (preventOverlap && latestMaskLayerId && displayed.has(latestMaskLayerId)) {
     const latest = displayed.get(latestMaskLayerId)!;
     const blockers = [...displayed.entries()]
       .filter(([id]) => id !== latestMaskLayerId)
       .map(([, mask]) => mask);
     displayed.set(latestMaskLayerId, excludeOverlaps(latest, blockers, canvas.width * canvas.height));
+    if (committedReference && latestMaskLayerId === activeLayerId) {
+      committedReference = excludeOverlaps(committedReference, blockers, canvas.width * canvas.height);
+    }
   }
   const layers = [];
   for (const layer of maskLayers.values()) {
@@ -412,8 +425,24 @@ function renderMasks(): void {
       layers.push({ mask: displayed.get(layer.id)!, color: layer.color, alpha: 0.34 });
     }
   }
-  const active = maskLayers.get(activeLayerId);
-  if (active?.visible) layers.push({ mask: displayed.get(active.id)!, color: active.color, alpha: 0.5 });
+  if (active?.visible) {
+    const previewMask = displayed.get(active.id)!;
+    const outlinedMask = committedReference ?? previewMask;
+    const outlineRadius = Math.max(2, Math.round(Math.min(canvas.width, canvas.height) / 300));
+    const edge = outerMaskOutline(outlinedMask, canvas.width, canvas.height, outlineRadius);
+    if (committedReference) {
+      const committedOnly = excludeOverlaps(
+        committedReference,
+        [previewMask],
+        canvas.width * canvas.height,
+      );
+      layers.push({ mask: committedOnly, color: active.color, alpha: 0.34 });
+      layers.push({ mask: previewMask, color: active.color, alpha: 0.5 });
+    } else {
+      layers.push({ mask: previewMask, color: active.color, alpha: 0.5 });
+    }
+    layers.push({ mask: edge, color: [199, 255, 76] as const, alpha: 0.96 });
+  }
   compositeMasks(pixels.data, canvas.width * canvas.height, layers);
   context.putImageData(pixels, 0, 0);
 }
@@ -421,6 +450,7 @@ function renderMasks(): void {
 function clearOverlay(): void {
   maskLayers.clear();
   latestStateRevision.clear();
+  latestCommitRevision.clear();
   activeLayerId = "";
   latestMaskLayerId = "";
   activeStrokeId = -1;
@@ -435,6 +465,7 @@ function createWorkerLayer(layer: LayerDescriptor, width: number, height: number
   editor.resetImage(width, height);
   maskLayers.set(layer.id, { id: layer.id, color: parseColor(layer.color), visible: layer.visible, editor });
   latestStateRevision.set(layer.id, 0);
+  latestCommitRevision.set(layer.id, 0);
 }
 
 function getLayer(layerId: string): WorkerLayer {

@@ -57,13 +57,13 @@ class AnnotationStore:
         """Return indexed saved-instance counts without expanding any masks."""
         return self.index.statistics(self._read_categories()["categories"])
 
-    def statistics_previews(self, category_id: int, limit: int = 8) -> list[dict]:
+    def statistics_previews(self, category_id: int, page: int = 1) -> dict:
         category = self._category(self._read_categories(), category_id)
-        items = self.index.previews(category_id, limit)
-        for item in items:
+        result = self.index.previews(category_id, page, 8)
+        for item in result["previews"]:
             version = self._preview_version(item["imageId"], category_id, category["color"])
             item["previewUrl"] = f"/api/statistics/previews/{item['imageId']}?category_id={category_id}&v={version}"
-        return items
+        return result
 
     def _preview_version(self, image_id: str, category_id: int, color: str) -> str:
         import hashlib

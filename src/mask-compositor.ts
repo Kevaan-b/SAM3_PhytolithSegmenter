@@ -4,6 +4,47 @@ export interface CompositeLayer {
   alpha: number;
 }
 
+export function outerMaskOutline(
+  mask: Uint8Array,
+  width: number,
+  height: number,
+  radius: number,
+): Uint8Array {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+    throw new Error("Mask dimensions must be positive integers.");
+  }
+  const pixelCount = width * height;
+  if (mask.byteLength !== Math.ceil(pixelCount / 8)) throw new Error("Mask dimensions do not match.");
+  const distance = Math.max(1, Math.floor(radius));
+  const stride = width + 1;
+  const integral = new Uint32Array(stride * (height + 1));
+  for (let y = 0; y < height; y += 1) {
+    let rowTotal = 0;
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      rowTotal += (mask[index >> 3]! >> (index & 7)) & 1;
+      integral[(y + 1) * stride + x + 1] = integral[y * stride + x + 1]! + rowTotal;
+    }
+  }
+  const outline = new Uint8Array(mask.byteLength);
+  for (let y = 0; y < height; y += 1) {
+    const top = Math.max(0, y - distance);
+    const bottom = Math.min(height, y + distance + 1);
+    for (let x = 0; x < width; x += 1) {
+      const index = y * width + x;
+      if ((mask[index >> 3]! & (1 << (index & 7))) !== 0) continue;
+      const left = Math.max(0, x - distance);
+      const right = Math.min(width, x + distance + 1);
+      const nearby = integral[bottom * stride + right]!
+        - integral[top * stride + right]!
+        - integral[bottom * stride + left]!
+        + integral[top * stride + left]!;
+      if (nearby > 0) outline[index >> 3] = outline[index >> 3]! | (1 << (index & 7));
+    }
+  }
+  return outline;
+}
+
 export function excludeOverlaps(
   mask: Uint8Array,
   blockers: readonly Uint8Array[],
