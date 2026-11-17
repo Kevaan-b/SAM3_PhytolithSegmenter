@@ -174,6 +174,10 @@ class AnnotationStore:
             return draft
 
     def save_image(self, image_id: str, width: int, height: int, layers: list[dict], latest_layer_id: str | None, prevent_overlap: bool) -> dict:
+        with self.lock:
+            return self._save_image_locked(image_id, width, height, layers, latest_layer_id, prevent_overlap)
+
+    def _save_image_locked(self, image_id: str, width: int, height: int, layers: list[dict], latest_layer_id: str | None, prevent_overlap: bool) -> dict:
         record = self.get_record(image_id)
         with Image.open(record.absolute_path) as image:
             actual_width, actual_height = image.size

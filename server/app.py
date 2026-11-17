@@ -5,7 +5,7 @@ import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -95,8 +95,8 @@ def require_ready() -> None:
 
 
 @app.get("/api/status")
-def status():
-    return engine.status()
+def status(x_session_token: str = Header(default="default")):
+    return engine.status(x_session_token)
 
 
 @app.get("/api/data-tree")
@@ -192,26 +192,26 @@ def save_image_annotations(image_id: str, request: AnnotationSave):
 
 
 @app.post("/api/cache/prioritize")
-def prioritize_cache(request: CachePrioritizeRequest):
+def prioritize_cache(request: CachePrioritizeRequest, x_session_token: str = Header(default="default")):
     require_ready()
     try:
-        return engine.prioritize_folder(request.folderPath, request.imageId)
+        return engine.prioritize_folder(request.folderPath, request.imageId, x_session_token)
     except KeyError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @app.post("/api/cache/interaction")
-def cache_interaction(request: CacheInteractionRequest):
-    engine.set_interactive(request.active)
-    annotations.set_interactive(request.active)
+def cache_interaction(request: CacheInteractionRequest, x_session_token: str = Header(default="default")):
+    active = engine.set_interactive(request.active, x_session_token)
+    annotations.set_interactive(active)
     return {"active": request.active}
 
 
 @app.post("/api/images/prepare")
-async def prepare(request: PrepareRequest):
+async def prepare(request: PrepareRequest, x_session_token: str = Header(default="default")):
     require_ready()
     try:
-        result = await engine.prepare(request.imageId)
+        result = await engine.prepare(request.imageId, x_session_token)
     except KeyError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     return {**result, "imageRevision": request.imageRevision}
@@ -235,3 +235,9 @@ async def segment(request: SegmentRequest):
         "X-Cache-State": metadata["cacheState"],
     }
     return Response(payload, media_type="application/octet-stream", headers=headers)
+
+
+@app.post("/internal/session/remove")
+def remove_session(x_session_token: str = Header()):
+    annotations.set_interactive(engine.remove_session(x_session_token))
+    return {"ok": True}

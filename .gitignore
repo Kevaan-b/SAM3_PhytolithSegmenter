@@ -8,5 +8,5 @@ __pycache__/
 *.pyc
 data/.samotator/
 data/
-__pycache__/
-*.pyc
+
+.venv/

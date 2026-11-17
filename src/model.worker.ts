@@ -57,6 +57,15 @@ worker.onmessage = ({ data }: MessageEvent<MainToWorkerMessage>) => {
   switch (data.type) {
     case "initialize":
       if (canvas) return;
+      if (data.sessionToken) {
+        const token = data.sessionToken;
+        const originalFetch = self.fetch.bind(self);
+        self.fetch = (input, init = {}) => {
+          const headers = new Headers(init.headers);
+          headers.set("X-Session-Token", token);
+          return originalFetch(input, { ...init, headers });
+        };
+      }
       canvas = data.canvas;
       context = canvas.getContext("2d", { alpha: true });
       void watchService();
@@ -229,6 +238,7 @@ async function watchService(): Promise<void> {
       post({ type: "cache-status", ...status.cache, queueDepth: status.queueDepth,
         currentJob: status.currentJob, backgroundPaused: status.backgroundPaused, activeFolder: status.activeFolder });
       if (status.error) throw new Error(status.error);
+      if (!status.ready) serviceReady = false;
       if (status.ready && !serviceReady) {
         serviceReady = true;
         post({ type: "model-ready" });
@@ -237,10 +247,8 @@ async function watchService(): Promise<void> {
         post({ type: "status", phase: "loading-model", message: "Loading SAM3 on the H100…" });
       }
     } catch (error) {
-      if (!serviceReady) {
-        postError("initialization", new Error(`${messageOf(error)} Start the backend with “python server/run.py”.`));
-        return;
-      }
+      serviceReady = false;
+      post({ type: "status", phase: "loading-model", message: `Waiting for H100 service: ${messageOf(error)}` });
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }

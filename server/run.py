@@ -6,8 +6,16 @@ from pathlib import Path
 
 
 def nvidia_library_path() -> str:
-    site = Path.home() / ".local" / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages" / "nvidia"
-    paths = [str(path / "lib") for path in site.iterdir() if (path / "lib").is_dir()] if site.is_dir() else []
+    # Pip can install NVIDIA libraries in a virtual environment, a conda
+    # environment, or the user site. Follow this interpreter's import paths.
+    paths: list[str] = []
+    for entry in sys.path:
+        site = Path(entry) / "nvidia" if entry else None
+        if site and site.is_dir():
+            for package in sorted(site.iterdir()):
+                lib = package / "lib"
+                if lib.is_dir() and str(lib) not in paths:
+                    paths.append(str(lib))
     existing = os.environ.get("LD_LIBRARY_PATH")
     if existing:
         paths.append(existing)
@@ -23,11 +31,11 @@ if __name__ == "__main__":
             sys.executable,
             "-m",
             "uvicorn",
-            "server.app:app",
+            "server.gateway:app",
             "--host",
-            "127.0.0.1",
+            os.environ.get("SAMOTATOR_HOST", "0.0.0.0"),
             "--port",
-            "8000",
+            os.environ.get("SAMOTATOR_PORT", "8000"),
         ],
         environment,
     )

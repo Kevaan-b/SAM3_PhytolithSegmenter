@@ -1014,6 +1014,15 @@ button:focus-visible {
   touch-action: none;
 }
 
+.image-stage.read-only::after {
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  background: rgba(55, 62, 58, 0.28);
+  content: "";
+  pointer-events: none;
+}
+
 .image-stage.disabled {
   cursor: wait;
   pointer-events: none;
@@ -1814,3 +1823,27 @@ button:focus-visible {
 @media (max-width: 760px) {
   .statistics-pagination { align-items: flex-start; flex-direction: column; }
 }
+
+.session-overlay { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; background: rgba(5, 12, 22, .82); }
+.session-overlay[hidden], .reservation-notice[hidden] { display: none; }
+.session-dialog { background: #172333; color: #fff; padding: 2rem; border-radius: 12px; max-width: 30rem; }
+.session-dialog button, .reservation-notice button { cursor: pointer; padding: .5rem 1rem; }
+.reservation-notice {
+  position: absolute;
+  z-index: 6;
+  top: 9px;
+  right: 9px;
+  left: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: .55rem .75rem;
+  color: #333a35;
+  background: rgba(247, 249, 247, .92);
+  border: 1px solid rgba(29, 36, 32, .18);
+  box-shadow: 0 3px 12px rgba(29, 36, 32, .12);
+  font-size: 13px;
+}
+.reservation-notice button { flex: 0 0 auto; }
+#session-count { white-space: nowrap; }

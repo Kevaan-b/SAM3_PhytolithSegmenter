@@ -29,6 +29,7 @@ export type MainToWorkerMessage =
   | {
       type: "initialize";
       canvas: OffscreenCanvas;
+      sessionToken?: string;
     }
   | {
       type: "load-image";

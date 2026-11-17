@@ -72,7 +72,7 @@ class PriorityGpuExecutor:
             if key is not None and key in self._pending:
                 previous = self._pending[key]
                 self._sequence += 1
-                job = QueuedJob(priority, self._sequence, previous.version + 1, key, previous.future, callback)
+                job = QueuedJob(min(priority, previous.priority), self._sequence, previous.version + 1, key, previous.future, callback)
                 self._pending[key] = job
                 heapq.heappush(self._jobs, job)
                 self._condition.notify_all()
@@ -145,9 +145,12 @@ class PriorityGpuExecutor:
                     self._unkeyed -= 1
                 self._current_job = job.key or "foreground"
             try:
-                job.future.set_result(job.callback())
+                result = job.callback()
+                if not job.future.done():
+                    job.future.set_result(result)
             except BaseException as error:
-                job.future.set_exception(error)
+                if not job.future.done():
+                    job.future.set_exception(error)
             finally:
                 with self._condition:
                     self._current_job = None
@@ -180,6 +183,8 @@ class SamEngine:
         self.active_folder = ""
         self.selected_image: str | None = None
         self.visited_folders: set[str] = set()
+        self.user_folders: dict[str, tuple[str, str | None]] = {}
+        self.interactive_users: set[str] = set()
         self.promote_ids: set[str] = set()
         self.folder_order: list[str] = []
         self.preprocess_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="sam3-preprocess")
@@ -272,7 +277,7 @@ class SamEngine:
             set_cache_states(self.tree, self.states)
             return self.tree
 
-    def status(self) -> dict:
+    def status(self, session: str = "default") -> dict:
         with self.lock:
             counts = {state: 0 for state in ("missing", "queued", "encoding", "ready")}
             for state in self.states.values():
@@ -285,7 +290,7 @@ class SamEngine:
                 "queueDepth": self.executor.queue_depth,
                 "currentJob": self.executor.current_job,
                 "backgroundPaused": self.executor.background_paused,
-                "activeFolder": self._active_folder_status(),
+                "activeFolder": self._active_folder_status(self.user_folders.get(session, (self.active_folder, None))[0]),
                 "lastEncodeMs": self.last_encode_ms,
                 "lastDecodeMs": self.last_decode_ms,
             }
@@ -296,27 +301,37 @@ class SamEngine:
         except KeyError as error:
             raise KeyError("Unknown image ID.") from error
 
-    def prioritize_folder(self, folder_path: str, selected_id: str | None = None) -> dict:
+    def prioritize_folder(self, folder_path: str, selected_id: str | None = None, session: str = "default") -> dict:
+        with self.lock:
+            return self._prioritize_folder_locked(folder_path, selected_id, session)
+
+    def _prioritize_folder_locked(self, folder_path: str, selected_id: str | None, session: str) -> dict:
         folder = [item.id for item in self.records.values() if item.folder_path == folder_path]
         if not folder and folder_path not in self._folder_paths():
             raise KeyError("Unknown folder path.")
         if selected_id is not None and selected_id not in folder:
             raise KeyError("Selected image is not in the requested folder.")
-        previous = self.active_folder
+        previous = self.user_folders.get(session, ("", None))[0]
+        self.user_folders[session] = (folder_path, selected_id)
         self.active_folder = folder_path
         self.visited_folders.add(folder_path)
-        if previous != folder_path:
+        if previous != folder_path and len(self.user_folders) == 1:
             for pending_id, future in list(self.preprocess_futures.items()):
                 record = self.records.get(pending_id)
                 if record and record.folder_path != folder_path and future.cancel():
                     self.preprocess_futures.pop(pending_id, None)
-        if previous != folder_path:
+        if previous != folder_path and len(self.user_folders) == 1:
             for item in self.records.values():
                 if item.folder_path == previous and self.states.get(item.id) in {"missing", "queued"}:
                     self.queue_embedding(item.id, 80)
         selected = selected_id or (folder[0] if folder else None)
         self.selected_image = selected
         self.promote_ids = set()
+        for user_folder, user_selected in self.user_folders.values():
+            user_items = [item.id for item in self.records.values() if item.folder_path == user_folder]
+            if user_selected in user_items:
+                user_index = user_items.index(user_selected)
+                self.promote_ids.update(user_items[max(0, user_index - 1):user_index + 2])
         if selected:
             index = folder.index(selected)
             self.promote_ids.add(selected)
@@ -332,13 +347,32 @@ class SamEngine:
         self._prime_preprocessing()
         return self._active_folder_status()
 
-    def prioritize(self, identifier: str) -> concurrent.futures.Future:
+    def prioritize(self, identifier: str, session: str = "default") -> concurrent.futures.Future:
         record = self.get_record(identifier)
-        self.prioritize_folder(record.folder_path, identifier)
+        self.prioritize_folder(record.folder_path, identifier, session)
         return self.queue_embedding(identifier, 10)
 
-    def set_interactive(self, active: bool) -> None:
-        self.executor.set_interactive(active)
+    def set_interactive(self, active: bool, session: str = "default") -> bool:
+        with self.lock:
+            if active: self.interactive_users.add(session)
+            else: self.interactive_users.discard(session)
+            combined = bool(self.interactive_users)
+            self.executor.set_interactive(combined)
+            return combined
+
+    def remove_session(self, session: str) -> bool:
+        with self.lock:
+            self.user_folders.pop(session, None)
+            self.interactive_users.discard(session)
+            self.promote_ids = set()
+            for folder, selected in self.user_folders.values():
+                items = [item.id for item in self.records.values() if item.folder_path == folder]
+                if selected in items:
+                    index = items.index(selected)
+                    self.promote_ids.update(items[max(0, index - 1):index + 2])
+            combined = bool(self.interactive_users)
+            self.executor.set_interactive(combined)
+            return combined
 
     def _folder_paths(self) -> set[str]:
         paths = {""}
@@ -348,9 +382,10 @@ class SamEngine:
         visit(self.tree)
         return paths
 
-    def _active_folder_status(self) -> dict:
-        identifiers = [item.id for item in self.records.values() if item.folder_path == self.active_folder]
-        return {"path": self.active_folder, "ready": sum(self.states.get(item) == "ready" for item in identifiers), "total": len(identifiers)}
+    def _active_folder_status(self, folder: str | None = None) -> dict:
+        folder = self.active_folder if folder is None else folder
+        identifiers = [item.id for item in self.records.values() if item.folder_path == folder]
+        return {"path": folder, "ready": sum(self.states.get(item) == "ready" for item in identifiers), "total": len(identifiers)}
 
     def _prime_preprocessing(self) -> None:
         for identifier in self.folder_order:
@@ -476,14 +511,14 @@ class SamEngine:
             size_bytes=sum(value.nbytes for value in arrays.values()),
         )
 
-    async def prepare(self, identifier: str) -> dict:
+    async def prepare(self, identifier: str, session: str = "default") -> dict:
         started = time.perf_counter()
         record = self.get_record(identifier)
         with Image.open(record.absolute_path) as image:
             width, height = image.size
         cache_hit = self.states.get(identifier) == "ready"
-        future = self.prioritize(identifier)
-        await asyncio.wrap_future(future)
+        future = self.prioritize(identifier, session)
+        await asyncio.shield(asyncio.wrap_future(future))
         return {
             "imageId": identifier,
             "width": width,
@@ -497,7 +532,7 @@ class SamEngine:
     async def segment(self, identifier: str, points: list[dict]) -> tuple[bytes, dict]:
         self.get_record(identifier)
         future = self.executor.submit(0, lambda: self._segment_sync(identifier, points))
-        return await asyncio.wrap_future(future)
+        return await asyncio.shield(asyncio.wrap_future(future))
 
     def _segment_sync(self, identifier: str, points: list[dict]) -> tuple[bytes, dict]:
         started = time.perf_counter()
@@ -524,10 +559,13 @@ class SamEngine:
         binding.bind_cpu_input("input_boxes", boxes)
         for key, tensor in embedding.tensors.items():
             binding.bind_ortvalue_input(key, tensor)
-        for output in ("iou_scores", "pred_masks", "object_score_logits"):
+        # The hover path only ranks candidates by IoU and consumes their masks.
+        # Binding object_score_logits makes ORT copy an unused output back from
+        # the GPU on every pointer update, so leave it unbound.
+        for output in ("iou_scores", "pred_masks"):
             binding.bind_output(output, "cpu")
         self.decoder.run_with_iobinding(binding)
-        scores, masks, _ = binding.copy_outputs_to_cpu()
+        scores, masks = binding.copy_outputs_to_cpu()
         candidate = int(np.argmax(scores.reshape(-1)))
         selected = masks[0, 0, candidate]
         resized = torch.nn.functional.interpolate(

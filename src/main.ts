@@ -41,6 +41,7 @@ document.querySelector<HTMLDivElement>("#app")!.innerHTML = `
         <span>Samotator</span>
       </a>
       <div class="header-controls">
+        <span id="session-count"></span><button id="disconnect-session" type="button" disabled>Disconnect</button>
         <div class="model-pill"><span class="model-dot"></span>SAM3 Q4 · H100 CUDA</div>
         <div class="status-chip loading" id="status-chip" role="status" aria-live="polite"><span class="status-light"></span><span id="status-label">Connecting to H100…</span></div>
         <div class="save-controls"><button class="autosave-button" id="autosave-toggle" type="button" aria-pressed="true" title="Autosave is on">Auto</button><button id="save-annotations" type="button" disabled>Saved</button></div>
@@ -337,6 +338,27 @@ let hoverPoint: PointPrompt | null = null;
 let pointerInside = false;
 let modelReady = false;
 let imageReady = false;
+let canEditImage = false;
+let sessionToken = sessionStorage.getItem("samotator-session") ?? "";
+const originalFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => {
+  const headers = new Headers(init.headers);
+  if (sessionToken) headers.set("X-Session-Token", sessionToken);
+  return originalFetch(input, { ...init, headers });
+};
+const sessionCount = getElement<HTMLElement>("session-count");
+const disconnectButton = getElement<HTMLButtonElement>("disconnect-session");
+const sessionOverlay = document.createElement("div");
+sessionOverlay.className = "session-overlay";
+sessionOverlay.innerHTML = `<div class="session-dialog"><h2>Shared annotation service</h2><p id="session-message">Connect to start or join the H100 service.</p><button id="connect-session" type="button">Connect</button></div>`;
+document.body.append(sessionOverlay);
+const sessionMessage = sessionOverlay.querySelector<HTMLElement>("#session-message")!;
+const connectButton = sessionOverlay.querySelector<HTMLButtonElement>("#connect-session")!;
+const reservationNotice = document.createElement("div");
+reservationNotice.className = "reservation-notice";
+reservationNotice.hidden = true;
+reservationNotice.innerHTML = `Another person is editing this image. You are viewing the saved annotations. <button type="button">Try editing</button>`;
+imageFrame.append(reservationNotice);
 let imageRevision = 0;
 let animationFrame = 0;
 let latestPointer: { clientX: number; clientY: number } | null = null;
@@ -382,8 +404,91 @@ if (
   };
 
   const offscreen = overlay.transferControlToOffscreen();
-  postWorker({ type: "initialize", canvas: offscreen }, [offscreen]);
-  void initializeProject();
+  let heartbeatTimer = 0;
+  let started = false;
+  let tokenClaimed = false;
+  const tabId = crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+  const tabChannel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("samotator-sessions");
+  let tokenInUse = false;
+  if (tabChannel) tabChannel.onmessage = ({ data }) => {
+    if (data.tab === tabId || !sessionToken || data.token !== sessionToken) return;
+    if (data.type === "probe" && tokenClaimed) tabChannel.postMessage({ type: "claimed", tab: tabId, token: sessionToken });
+    if (data.type === "claimed") tokenInUse = true;
+  };
+  async function connectSession(): Promise<void> {
+    connectButton.disabled = true;
+    sessionMessage.textContent = "Connecting to the shared service…";
+    try {
+      if (sessionToken && tabChannel && !started) {
+        tokenInUse = false;
+        tabChannel.postMessage({ type: "probe", tab: tabId, token: sessionToken });
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        if (tokenInUse) sessionToken = "";
+      }
+      const response = await fetch("/api/session/connect", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: sessionToken || null }) });
+      if (!response.ok) throw await responseErrorFromFetch(response);
+      const session = await response.json() as { token: string; connected: number; limit: number; leaseSeconds: number };
+      sessionToken = session.token;
+      tokenClaimed = true;
+      sessionStorage.setItem("samotator-session", sessionToken);
+      sessionCount.textContent = `${session.connected}/${session.limit} connected`;
+      sessionOverlay.hidden = true;
+      disconnectButton.disabled = false;
+      if (!started) {
+        started = true;
+        postWorker({ type: "initialize", canvas: offscreen, sessionToken }, [offscreen]);
+        void initializeProject();
+      }
+      heartbeatTimer = window.setInterval(() => void heartbeat(), Math.max(1000, session.leaseSeconds * 1000 / 3));
+    } catch (error) {
+      sessionMessage.textContent = error instanceof Error ? error.message : String(error);
+    } finally { connectButton.disabled = false; }
+  }
+  async function heartbeat(): Promise<void> {
+    try {
+      const response = await fetch("/api/session/heartbeat", { method: "POST" });
+      if (response.status === 401) {
+        window.clearInterval(heartbeatTimer);
+        disconnectButton.disabled = true;
+        sessionMessage.textContent = "Your session expired. Reload the page to reconnect; unsaved edits could not be saved.";
+        sessionOverlay.hidden = false;
+        connectButton.hidden = true;
+        return;
+      }
+      if (!response.ok) return;
+      const status = await response.json() as { connected: number; limit: number; reservation: string | null };
+      sessionCount.textContent = `${status.connected}/${status.limit} connected`;
+      if (canEditImage && activeImage && status.reservation !== activeImage.id) {
+        canEditImage = false;
+        updateReservationUi();
+      }
+    } catch { sessionCount.textContent = "Reconnecting…"; }
+  }
+  connectButton.addEventListener("click", () => void connectSession());
+  disconnectButton.addEventListener("click", () => void (async () => {
+    disconnectButton.disabled = true;
+    const workspace = document.querySelector<HTMLElement>(".workspace")!;
+    workspace.inert = true;
+    while (saving) await new Promise((resolve) => setTimeout(resolve, 100));
+    if (dirty && (!(await saveAnnotations()) || dirty)) {
+      window.alert(`Could not save your edits: ${lastSaveError ?? "please try again"}`);
+      disconnectButton.disabled = false;
+      workspace.inert = false;
+      return;
+    }
+    try {
+      const response = await fetch("/api/session/disconnect", { method: "POST" });
+      if (!response.ok) throw await responseErrorFromFetch(response);
+      sessionStorage.removeItem("samotator-session");
+      window.clearInterval(heartbeatTimer);
+      window.location.reload();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+      disconnectButton.disabled = false;
+      workspace.inert = false;
+    }
+  })());
+  if (sessionToken) void connectSession();
 
   function postWorker(
     message: MainToWorkerMessage,
@@ -412,6 +517,7 @@ if (
       }
 
       case "model-ready": {
+        if (modelReady) { setStatus("ready", "Reconnected"); return; }
         modelReady = true;
         progressTrack.classList.remove("visible");
         if (activeImage) {
@@ -919,7 +1025,7 @@ if (
   }
 
   async function selectFolderAfterSave(folder: DataFolder, preferredImagePath?: string): Promise<void> {
-    if (dirty && !(await saveAnnotations())) return;
+    if (dirty && (!(await saveAnnotations()) || dirty)) return;
     currentFolder = folder;
     expandAncestors(folder.path);
     const image =
@@ -936,8 +1042,11 @@ if (
     }
   }
 
+  let selectionQueue: Promise<void> = Promise.resolve();
   function selectImage(image: DataImage): void {
-    void selectImageAfterSave(image);
+    selectionQueue = selectionQueue.then(() => selectImageAfterSave(image)).catch((error) => {
+      window.alert(error instanceof Error ? error.message : String(error));
+    });
   }
 
   async function selectImageAfterSave(image: DataImage): Promise<void> {
@@ -945,12 +1054,30 @@ if (
       renderDataBrowser();
       return;
     }
-    if (dirty && !(await saveAnnotations())) {
+    if (dirty && (!(await saveAnnotations()) || dirty)) {
       renderDataBrowser();
       return;
     }
 
+    imageStage.style.pointerEvents = "none";
+    for (const selector of [".masking-class-section", ".masks-section", ".refine-panel"]) {
+      const element = document.querySelector<HTMLElement>(selector);
+      if (element) element.inert = true;
+    }
+    try {
+      const response = await fetch("/api/session/reservation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageId: image.id }) });
+      if (!response.ok) throw await responseErrorFromFetch(response);
+      const result = await response.json() as { editable: boolean };
+      canEditImage = result.editable;
+      updateReservationUi();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+      updateReservationUi();
+      renderDataBrowser();
+      return;
+    }
     activeImage = image;
+    updateReservationUi();
     imageRevision += 1;
     imageReady = false;
     resetMaskUiState();
@@ -967,8 +1094,32 @@ if (
     loadActiveImage();
   }
 
+  function updateReservationUi(): void {
+    reservationNotice.hidden = canEditImage || !activeImage;
+    imageStage.classList.toggle("read-only", !canEditImage && Boolean(activeImage));
+    imageStage.style.pointerEvents = canEditImage ? "" : "none";
+    for (const selector of [".masking-class-section", ".masks-section", ".refine-panel"]) {
+      const element = document.querySelector<HTMLElement>(selector);
+      if (element) element.inert = !canEditImage;
+    }
+  }
+  reservationNotice.querySelector("button")!.addEventListener("click", () => void (async () => {
+    if (!activeImage) return;
+    try {
+      const response = await fetch("/api/session/reservation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageId: activeImage.id }) });
+      if (!response.ok) throw await responseErrorFromFetch(response);
+      const result = await response.json() as { editable: boolean };
+      canEditImage = result.editable;
+      updateReservationUi();
+      if (canEditImage) void loadActiveImage();
+    } catch (error) { window.alert(error instanceof Error ? error.message : String(error)); }
+  })());
+
   function clearActiveImage(): void {
+    void fetch("/api/session/reservation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageId: null }) });
+    canEditImage = false;
     activeImage = null;
+    updateReservationUi();
     imageRevision += 1;
     resetMaskUiState();
     imageReady = false;
@@ -1151,7 +1302,7 @@ if (
         showNotice("Image unavailable", "Rescan data/ if this image was recently moved.");
         return;
       }
-      if (dirty && !(await saveAnnotations())) return;
+      if (dirty && (!(await saveAnnotations()) || dirty)) return;
       currentFolder = match.folder;
       expandAncestors(match.folder.path);
       void prioritizeCache(match.folder.path, match.image.id);

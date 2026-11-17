@@ -3,33 +3,108 @@
 Local point-prompt segmentation using the supplied SAM3 Q4 ONNX bundle and
 an NVIDIA H100 inference service.
 
-## Run
+## Set up the H100 server
+
+Run these steps on the Linux server that has the NVIDIA H100 GPU. It needs
+Git, Git LFS, Node.js 22.13+ on the 22.x line or Node.js 24+, Python 3.11+,
+and NVIDIA driver/CUDA support for ONNX Runtime's CUDA provider. The Python
+requirements install the application libraries, including GPU ONNX Runtime and
+PyTorch.
+
+For a new checkout, clone the repository and enter its directory:
 
 ```bash
-npm install
+git clone <repository-url>
+cd samotator
+```
+
+For an existing checkout, enter the repository directory and pull changes:
+
+```bash
+cd /path/to/samotator
+git pull --ff-only
+```
+
+Fetch the model sidecars tracked by Git LFS after cloning or pulling:
+
+```bash
+git lfs install
+git lfs pull
+```
+
+Keep the two `.onnx_data` files beside their matching `.onnx` graphs. The
+server can also resolve Git LFS pointer files using objects already in the local
+LFS cache. It does not download weights at startup; missing LFS objects cause a
+startup error.
+
+Install dependencies and build the frontend from the repository root:
+
+```bash
+npm ci
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-npm run dev:server
+npm run build
 ```
 
-In a second terminal:
+Start the shared service on the H100 server, from the same activated virtual
+environment and repository directory:
 
 ```bash
-npm run dev
+python -m server.run
 ```
 
-Open <http://127.0.0.1:5173> in a current Chrome or Edge browser.
+The gateway serves the built frontend and listens on port 8000 by default. A
+user on the trusted LAN or VPN can open `http://SERVER_ADDRESS:8000` in a
+current Chrome or Edge browser and click **Connect**. To connect from a
+workstation using VS Code Remote SSH, connect VS Code to the server, open the
+**Ports** panel, forward remote port `8000`, then open the forwarded local
+address (usually `http://localhost:8000`) in the workstation browser. Keep the
+remote SSH connection and service running. The first connection starts a
+single GPU worker and loads SAM3; by default up to eight browser sessions share
+it. Disconnect saves pending changes and releases the session. The last disconnect stops the
+worker and releases its GPU memory, while the lightweight gateway remains
+available. Closing a browser or losing its connection releases its place and
+image reservation after the lease expires. A browser refresh reuses its lease.
+Run only one gateway process for this dataset; do not use multiple Uvicorn
+workers or multiple gateway instances.
 
-The Python launcher discovers the installed NVIDIA runtime libraries and
-starts FastAPI on `127.0.0.1:8000`. It requires ONNX Runtime's CUDA provider;
-there is no slow CPU fallback. Vite proxies `/api` to that service.
+The gateway binds to `0.0.0.0:8000` by default. Set `SAMOTATOR_HOST` and
+`SAMOTATOR_PORT` to change the address. `SAMOTATOR_MAX_SESSIONS` sets the
+maximum number of connected browser tabs (default `8`); set it to a positive
+integer before starting the gateway, for example
+`SAMOTATOR_MAX_SESSIONS=12 python -m server.run`. The private GPU worker
+listens on localhost port 18001; change that port with
+`SAMOTATOR_WORKER_PORT`. Set `SAMOTATOR_LEASE_SECONDS` (default `60`) to adjust
+failure recovery. Set `SAMOTATOR_GPU_CACHE_GIB` (default `16`) to adjust the
+GPU embedding cache size. Restrict network access using a firewall, trusted
+LAN, VPN, or SSH port forwarding; the application has no login or transport
+encryption. The gateway must remain running, for example under a systemd
+service; restarting it disconnects existing sessions. Reconnect in the browser
+if a session expires. A session is a browser tab, and uses a slot until it
+disconnects or its lease expires.
 
-Embeddings are computed folder-on-demand and persisted under `.samotator-cache/embeddings/`. The selected image is prepared first, then its immediate neighbors, then the rest of the selected folder. Previously visited folders resume at low priority; unvisited folders are never queued. Hovering or drawing pauses new background encodes. Existing embeddings are reused through a persistent fingerprint catalog without hashing every source image at startup.
+Only one person can edit an image at a time. Others see the saved version and
+can use **Try editing** after it is released. Categories and annotation data are
+shared. Embeddings persist under `.samotator-cache/embeddings/`, are reused
+across sessions, and are computed folder-on-demand. The selected image and its
+neighbors are prioritized ahead of other images. GPU embeddings share a 16 GiB
+LRU cache, configurable with `SAMOTATOR_GPU_CACHE_GIB`; both the models and GPU
+cache are freed when the worker exits. Interactive decoding takes priority over
+background encoding. Requests currently run individually: batch execution is
+not enabled until correctness and interactive latency have been benchmarked on
+the deployed model and hardware.
 
-Only the selected image and its neighbors are proactively kept on the H100. Other embeddings enter a 16 GiB GPU LRU when used, and duplicate image content shares the same GPU entry. Override the budget with `SAMOTATOR_GPU_CACHE_GIB`.
+The launcher discovers installed NVIDIA runtime libraries and requires ONNX
+Runtime's CUDA provider; there is no CPU fallback. If the ONNX sidecars are Git
+LFS pointer files, the server resolves their already-downloaded objects into
+`.samotator-cache/model/`. Missing LFS objects produce a startup error. No
+remote model requests are made.
 
-If the ONNX sidecars are Git LFS pointer files, the server resolves their
-already-downloaded objects into `.samotator-cache/model/`. Missing LFS objects
-produce a clear startup error. No remote model requests are made.
+For frontend development, run `npm run dev:server` and `npm run dev` in separate
+terminals. Vite proxies `/api` to the gateway; the production gateway serves the
+built frontend and images directly.
 
 ## Data folders
 

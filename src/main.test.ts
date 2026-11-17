@@ -98,6 +98,9 @@ class MockWorker {
   }
 }
 
+let mockedFetch: ReturnType<typeof vi.fn>;
+let reservationEditable = false;
+
 describe("browser UI with a mocked inference worker", () => {
   beforeAll(async () => {
     document.body.innerHTML = '<div id="app"></div>';
@@ -115,10 +118,14 @@ describe("browser UI with a mocked inference worker", () => {
     );
     vi.stubGlobal("Worker", MockWorker);
     let category = { id: 1, name: "object", supercategory: "phytolith", color: "#4094dc", active: true };
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    mockedFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       let body: unknown = DATA_TREE;
-      if (url === "/api/classes" && (!init?.method || init.method === "GET")) {
+      if (url === "/api/session/connect") {
+        body = { token: "test-session", connected: 1, limit: 8, leaseSeconds: 60 };
+      } else if (url === "/api/session/reservation") {
+        body = { editable: reservationEditable };
+      } else if (url === "/api/classes" && (!init?.method || init.method === "GET")) {
         body = { schema_version: 1, next_category_id: 2, categories: [category] };
       } else if (url === "/api/statistics") {
         body = {
@@ -155,7 +162,8 @@ describe("browser UI with a mocked inference worker", () => {
         body = { savedLayers: 1, emptyLayers: 0 };
       }
       return { ok: true, status: 200, json: async () => body };
-    }));
+    });
+    vi.stubGlobal("fetch", mockedFetch);
     vi.stubGlobal(
       "requestAnimationFrame",
       (callback: FrameRequestCallback) => {
@@ -168,7 +176,9 @@ describe("browser UI with a mocked inference worker", () => {
   });
 
   it("navigates folders and images, then handles point interactions", async () => {
+    document.querySelector<HTMLButtonElement>("#connect-session")!.click();
     const worker = MockWorker.instance;
+    await vi.waitFor(() => expect(worker.messages.length).toBeGreaterThan(0));
     expect(worker.messages[0]).toMatchObject({ type: "initialize" });
 
     await vi.waitFor(() => {
@@ -176,6 +186,18 @@ describe("browser UI with a mocked inference worker", () => {
         document.querySelector("#folder-tree-value")?.textContent,
       ).toBe("Data / train");
     });
+
+    const notice = document.querySelector<HTMLElement>(".reservation-notice")!;
+    const imageStage = document.querySelector<HTMLElement>("#image-stage")!;
+    await vi.waitFor(() => expect(notice.hidden).toBe(false));
+    expect(notice.parentElement?.id).toBe("image-frame");
+    expect(imageStage.classList.contains("read-only")).toBe(true);
+    expect(document.querySelector<HTMLElement>(".refine-panel")?.inert).toBe(true);
+    reservationEditable = true;
+    notice.querySelector<HTMLButtonElement>("button")!.click();
+    await vi.waitFor(() => expect(notice.hidden).toBe(true));
+    expect(imageStage.classList.contains("read-only")).toBe(false);
+    expect(document.querySelector<HTMLElement>(".refine-panel")?.inert).toBe(false);
 
     worker.emit({ type: "model-ready" });
     await Promise.resolve();
@@ -224,7 +246,7 @@ describe("browser UI with a mocked inference worker", () => {
       expect(document.querySelector("#statistics-page-counter")?.textContent).toBe("Page 2 of 3 · 1 remaining");
     });
     expect(previousPage.disabled).toBe(false);
-    expect(vi.mocked(fetch).mock.calls.some(([url]) =>
+    expect(mockedFetch.mock.calls.some(([url]) =>
       String(url).includes("/api/statistics/classes/1/previews?page=2")
     )).toBe(true);
     maskingTab.click();
@@ -241,16 +263,12 @@ describe("browser UI with a mocked inference worker", () => {
     document.querySelector<HTMLButtonElement>("#next-folder-button")!.click();
     await Promise.resolve();
     await Promise.resolve();
-    expect(
-      document.querySelector("#folder-tree-value")?.textContent,
-    ).toBe("Data / val");
-    expect(
-      document.querySelector<HTMLSelectElement>("#image-select")?.value,
-    ).toBe("val/val-a.png");
-    expect(worker.messages.at(-1)).toMatchObject({
+    await vi.waitFor(() => expect(document.querySelector("#folder-tree-value")?.textContent).toBe("Data / val"));
+    await vi.waitFor(() => expect(document.querySelector<HTMLSelectElement>("#image-select")?.value).toBe("val/val-a.png"));
+    await vi.waitFor(() => expect(worker.messages.at(-1)).toMatchObject({
       type: "load-image",
       url: "/data/val/val-a.png",
-    });
+    }));
     expect(setupPanel.hidden).toBe(false);
     maskingTab.click();
     expect(maskingPanel.hidden).toBe(false);
@@ -269,6 +287,8 @@ describe("browser UI with a mocked inference worker", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(treeMenu.hidden).toBe(true);
+    await vi.waitFor(() => expect(document.querySelector("#folder-tree-value")?.textContent).toBe("Data / train"));
+    await vi.waitFor(() => expect(worker.messages.at(-1)).toMatchObject({ type: "load-image", url: "/data/train/train-a.png" }));
     maskingTab.click();
 
     const imageSelect =
@@ -277,14 +297,13 @@ describe("browser UI with a mocked inference worker", () => {
     imageSelect.dispatchEvent(new Event("change", { bubbles: true }));
     await Promise.resolve();
     await Promise.resolve();
-    expect(
-      document.querySelector<HTMLButtonElement>("#next-image-button")?.disabled,
-    ).toBe(true);
+    await vi.waitFor(() => expect(document.querySelector<HTMLButtonElement>("#next-image-button")?.disabled).toBe(true));
 
     document.querySelector<HTMLButtonElement>("#previous-image-button")!.click();
     await Promise.resolve();
     await Promise.resolve();
-    expect(imageSelect.value).toBe("train/train-a.png");
+    await vi.waitFor(() => expect(imageSelect.value).toBe("train/train-a.png"));
+    await vi.waitFor(() => expect(worker.messages.at(-1)).toMatchObject({ type: "load-image", url: "/data/train/train-a.png" }));
 
     const latestLoad = [...worker.messages]
       .reverse()
@@ -376,7 +395,7 @@ describe("browser UI with a mocked inference worker", () => {
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
-    expect(vi.mocked(fetch).mock.calls.some(([url, init]) =>
+    expect(mockedFetch.mock.calls.some(([url, init]) =>
       String(url).includes("/annotations") && init?.method === "PUT"
     )).toBe(true);
     expect(saveButton.textContent).toBe("Saved");

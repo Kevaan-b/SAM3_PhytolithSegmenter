@@ -165,3 +165,24 @@ def test_corrupt_derived_index_recovers_from_drafts(tmp_path: Path):
     recovered = AnnotationIndex(index_path, tmp_path / "data" / ".samotator" / "annotations")
     recovered.reconcile()
     assert recovered.statistics([])["totalAnnotations"] == 1
+
+
+def test_concurrent_saves_assign_unique_image_and_annotation_ids(tmp_path: Path):
+    from concurrent.futures import ThreadPoolExecutor
+    data = tmp_path / 'data'
+    records = {}
+    for number in range(8):
+        path = data / f'{number}.png'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new('RGB', (5, 4)).save(path)
+        records[str(number)] = ImageRecord(str(number), path.name, path.name, path, '')
+    store = AnnotationStore(data, records.__getitem__)
+    mask = packed(5, 4, [1])
+    def save(identifier):
+        store.save_image(identifier, 5, 4, [{'layerId': identifier, 'categoryId': 1, 'rawMask': mask, 'effectiveMask': mask}], identifier, False)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(save, records))
+    drafts = [store.load_image(identifier) for identifier in records]
+    assert len({draft['imageNumber'] for draft in drafts}) == 8
+    assert len({draft['layers'][0]['annotationId'] for draft in drafts}) == 8
+    store.shutdown()

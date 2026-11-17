@@ -6,3 +6,4 @@ pycocotools
 safetensors
 torch
 uvicorn
+httpx
