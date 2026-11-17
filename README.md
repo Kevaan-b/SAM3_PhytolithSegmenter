@@ -5,11 +5,18 @@ an NVIDIA H100 inference service.
 
 ## Set up the H100 server
 
-Run these steps on the Linux server that has the NVIDIA H100 GPU. It needs
-Git, Git LFS, Node.js 22.13+ on the 22.x line or Node.js 24+, Python 3.11+,
-and NVIDIA driver/CUDA support for ONNX Runtime's CUDA provider. The Python
-requirements install the application libraries, including GPU ONNX Runtime and
-PyTorch.
+Run these steps on the Linux server with the NVIDIA H100. They require an
+existing conda installation, internet access to conda-forge and the npm
+registry, and an NVIDIA driver compatible with CUDA 12.9. The driver is a
+system prerequisite; it is not installed by conda.
+
+Create and activate a dedicated environment with Git and Git LFS. This avoids
+installing tools into your conda `base` environment:
+
+```bash
+conda create -n samotator --override-channels -c conda-forge git git-lfs
+conda activate samotator
+```
 
 For a new checkout, clone the repository and enter its directory:
 
@@ -25,35 +32,60 @@ cd /path/to/samotator
 git pull --ff-only
 ```
 
-Fetch the model sidecars tracked by Git LFS after cloning or pulling:
+Install the rest of the conda-forge dependencies and fetch the model sidecars:
 
 ```bash
-git lfs install
+conda env update -n samotator -f environment.yml
+git lfs install --local
 git lfs pull
 ```
 
-Keep the two `.onnx_data` files beside their matching `.onnx` graphs. The
-server can also resolve Git LFS pointer files using objects already in the local
-LFS cache. It does not download weights at startup; missing LFS objects cause a
-startup error.
+The environment file selects a CUDA build of ONNX Runtime, CUDA 12.9, a
+CPU build of PyTorch for mask postprocessing, Python, Node.js, and all Python
+application dependencies. The H100 performs ONNX inference. Keep the two
+`.onnx_data` files beside their matching `.onnx` graphs. The server can also
+resolve Git LFS pointer files using objects already in the local LFS cache. It
+does not download weights at startup; missing LFS objects cause a startup
+error.
 
-Install dependencies and build the frontend from the repository root:
+Install the JavaScript packages specified in the lockfile and build the frontend:
+Node.js and npm come from conda, while the application-specific JavaScript
+packages come from the npm registry.
 
 ```bash
 npm ci
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
 npm run build
 ```
 
-Start the shared service on the H100 server, from the same activated virtual
-environment and repository directory:
+Confirm that ONNX Runtime reports its CUDA provider:
 
 ```bash
+python -c "import onnxruntime as ort; print(ort.get_available_providers())"
+```
+
+The output should include `CUDAExecutionProvider`. This check confirms the
+provider is present; the service verifies that the model can actually initialize
+on CUDA when a user connects.
+
+Start the shared service on the H100 server, from the repository directory:
+
+```bash
+conda activate samotator
 python -m server.run
 ```
+
+After pulling future changes, update the environment, model files, and frontend
+before restarting the service:
+
+```bash
+conda activate samotator
+conda env update -n samotator -f environment.yml
+git lfs pull
+npm ci
+npm run build
+```
+ Run the Python tests with `python -m pytest -q server`
+and the frontend tests with `npm test` while the environment is active.
 
 The gateway serves the built frontend and listens on port 8000 by default. A
 user on the trusted LAN or VPN can open `http://SERVER_ADDRESS:8000` in a
